@@ -1,0 +1,11 @@
+student_id,full_name,date_of_birth,gender,admission_date,class_id,guardian_id,status
+1,Kelechi Ojo,2012-12-14,Female,2024-09-09,1,1,active
+2,Aisha Umeh,2012-04-14,Male,2024-09-09,2,2,active
+3,Bisi Umeh,2014-05-17,Female,2024-09-09,3,3,active
+4,Tobi Okafor,2014-01-17,Female,2024-09-09,3,4,active
+5,Bisi Ojo,2012-03-21,Female,2024-09-09,3,5,active
+6,Damilola Umeh,2013-08-14,Male,2024-09-09,3,6,active
+7,Bisi Okafor,2013-11-08,Male,2024-09-09,2,7,active
+8,Bisi Bello,2014-06-06,Male,2024-09-09,2,8,active
+9,Tobi Suleiman,2013-10-12,Female,2024-09-09,1,1,active
+10,Ngozi Umeh,2012-08-02,Female,2024-09-09,3,2,active

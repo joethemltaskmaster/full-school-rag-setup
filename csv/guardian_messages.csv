@@ -1,0 +1,11 @@
+message_id,guardian_id,student_id,sender_teacher_id,subject,message_text,sent_at,status
+1,1,1,1,Attendance notice,Your ward was marked absent today. Kindly confirm reason.,1/15/2026 9:00,sent
+2,2,2,2,Attendance notice,Your ward was marked absent today. Kindly confirm reason.,1/15/2026 9:00,sent
+3,3,3,3,Performance update,Your ward performed well in the recent Midterm assessment.,1/15/2026 9:00,sent
+4,4,4,3,Fee reminder,This is a reminder that First Term fees are still outstanding.,1/15/2026 9:00,delivered
+5,5,5,3,Event notice,The school PTA meeting holds this Saturday at 10 AM.,1/15/2026 9:00,sent
+6,6,6,3,Fee reminder,This is a reminder that First Term fees are still outstanding.,1/15/2026 9:00,read
+7,7,7,2,Event notice,The school PTA meeting holds this Saturday at 10 AM.,1/15/2026 9:00,sent
+8,8,8,2,Event notice,The school PTA meeting holds this Saturday at 10 AM.,1/15/2026 9:00,delivered
+9,1,9,1,Fee reminder,This is a reminder that First Term fees are still outstanding.,1/15/2026 9:00,sent
+10,2,10,3,Attendance notice,Your ward was marked absent today. Kindly confirm reason.,1/15/2026 9:00,read

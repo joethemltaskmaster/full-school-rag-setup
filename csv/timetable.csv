@@ -1,0 +1,16 @@
+timetable_id,class_id,subject_id,teacher_id,day_of_week,start_time,end_time
+1,1,1,1,Monday,08:00,09:00
+2,1,2,2,Tuesday,09:00,10:00
+3,1,1,1,Wednesday,10:00,11:00
+4,1,2,2,Thursday,08:00,09:00
+5,1,1,1,Friday,09:00,10:00
+6,2,3,1,Monday,08:00,09:00
+7,2,4,2,Tuesday,09:00,10:00
+8,2,3,1,Wednesday,10:00,11:00
+9,2,4,2,Thursday,08:00,09:00
+10,2,3,1,Friday,09:00,10:00
+11,3,5,1,Monday,08:00,09:00
+12,3,6,2,Tuesday,09:00,10:00
+13,3,5,1,Wednesday,10:00,11:00
+14,3,6,2,Thursday,08:00,09:00
+15,3,5,1,Friday,09:00,10:00

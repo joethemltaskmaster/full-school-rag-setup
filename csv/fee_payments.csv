@@ -1,0 +1,11 @@
+payment_id,student_id,term,amount_due,amount_paid,payment_date,payment_method,status
+1,1,First Term,75000,41541.21,2025-09-15,bank transfer,partial
+2,2,First Term,75000,56486.93,2025-09-15,cash,partial
+3,3,First Term,75000,75000,2025-09-15,card,paid
+4,4,First Term,75000,75000,2025-09-15,cash,paid
+5,5,First Term,75000,42214.5,2025-09-15,cash,partial
+6,6,First Term,75000,75000,2025-09-15,bank transfer,paid
+7,7,First Term,75000,75000,2025-09-15,card,paid
+8,8,First Term,75000,75000,2025-09-15,cash,paid
+9,9,First Term,75000,75000,2025-09-15,bank transfer,paid
+10,10,First Term,75000,75000,2025-09-15,cash,paid
