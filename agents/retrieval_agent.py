@@ -38,6 +38,8 @@ import logging
 import os
 from pathlib import Path
 from typing import Any
+from dotenv import load_dotenv
+load_dotenv(dotenv_path=r"C:\Users\Joseph\Desktop\Database\agents\.env")  # must come first
 
 logger = logging.getLogger("retrieval_agent")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -63,7 +65,7 @@ class RetrievalAgent:
 
     def __init__(
         self,
-        knowledge_base_path: str,
+        knowledge_base_path: str = r"C:\Users\Joseph\Desktop\Database\school_knowledge_base.txt",
         index_cache_dir: str = "faiss_index_cache",
         embedding_model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
         gemini_model_name: str = "gemini-2.5-flash",
@@ -181,7 +183,7 @@ class RetrievalAgentHandler(OrchestratorAgentInterface):
         {"query": "What are the school's fee payment policies?"}
     """
 
-    def __init__(self, knowledge_base_path: str = "school_knowledge_base.txt", **kwargs):
+    def __init__(self, knowledge_base_path: str = r"C:\Users\Joseph\Desktop\Database\school_knowledge_base.txt", **kwargs):
         self.agent = RetrievalAgent(knowledge_base_path=knowledge_base_path, **kwargs)
 
     def handle(self, task: dict[str, Any]) -> dict[str, Any]:
@@ -197,5 +199,7 @@ class RetrievalAgentHandler(OrchestratorAgentInterface):
 
 
 if __name__ == "__main__":
-    handler = RetrievalAgentHandler(knowledge_base_path="school_knowledge_base.txt")
-    print(handler.handle({"query": "What are the school's fee payment policies?"}))
+    handler = RetrievalAgentHandler(
+        knowledge_base_path=r"C:\Users\Joseph\Desktop\Database\school_knowledge_base.txt"
+    )
+    print(handler.handle({"query": "Who is gregory Ogwuche?"}))

@@ -35,9 +35,10 @@ get_class_timetable / get_teacher_schedule. The planner treats
 the data agent like any other read, same as attendance, scores, or fees.
 
 Compatible with orchestrator.py as provided: every step the planner
-emits maps 1:1 onto one of Orchestrator's existing public methods
-(execute, predict, ask, run_workflow) -- no changes to Orchestrator are
-required.
+emits maps onto Orchestrator's actual public interface -- a single
+execute(task_dict) that routes on the "intent" / "model" / "query" key,
+plus run_workflow(name, **params) for multi-step workflows -- no
+changes to Orchestrator are required.
 
 Usage:
     from orchestrator import Orchestrator
@@ -463,35 +464,38 @@ class PlannerAgent:
 
         for step in plan.steps:
             if step.agent == "data":
-                result = self.orchestrator.execute(step.action, **_clean(step.params))
-                if result.get("ok"):
-                    last_data_result = result.get("data")
+                task = {"intent": step.action, **_clean(step.params)}
+                result = self.orchestrator.execute(task)
+                if result.get("status") == "success":
+                    last_data_result = result.get("result")
 
             elif step.agent == "predictor":
                 record = last_data_result if isinstance(last_data_result, dict) else None
                 if record is None:
                     result = {
-                        "ok": False, "agent": "predictor",
+                        "status": "error", "agent": "prediction_agent",
                         "error": "No upstream student record available to build features from.",
                     }
                 else:
-                    result = self.orchestrator.predict(model=step.action, record=record)
+                    task = {"model": step.action, "record": record}
+                    result = self.orchestrator.execute(task)
 
             elif step.agent == "retrieval":
-                result = self.orchestrator.ask(**_clean(step.params))
+                task = {"query": step.params.get("query", "")}
+                result = self.orchestrator.execute(task)
 
             elif step.agent == "workflow":
                 result = self.orchestrator.run_workflow(step.action, **_clean(step.params))
 
             else:
-                result = {"ok": False, "error": f"Planner produced an unroutable step: {step}"}
+                result = {"status": "error", "agent": "planner", "error": f"Planner produced an unroutable step: {step}"}
 
             step_results.append({"step": step.step, "agent": step.agent, "action": step.action, "result": result})
 
-            if not result.get("ok"):
+            if result.get("status") != "success":
                 break
 
-        overall_ok = bool(step_results) and all(r["result"].get("ok") for r in step_results)
+        overall_ok = bool(step_results) and all(r["result"].get("status") == "success" for r in step_results)
         return {
             "ok": overall_ok,
             "plan": plan.to_dict(),

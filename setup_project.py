@@ -31,6 +31,8 @@ import sqlite3
 import subprocess
 import sys
 from pathlib import Path
+from dotenv import load_dotenv
+load_dotenv(dotenv_path=".env")
 
 DB_NAME = "school.db"
 MODEL_DIR = Path("model")               # what prediction_agent.py's MODEL_REGISTRY expects

@@ -1,0 +1,7 @@
+This is a sample document for our RAG system. It contains some information that we want to retrieve later. LangChain provides many useful tools for building LLM applications. We are using FAISS for efficient similarity search on our embeddings. The HuggingFaceEmbeddings model converts text into numerical vectors. This setup is designed to be compatible with Google Gemini API integration in future steps. 
+
+Details:
+Student_name: Gregory Ogwuche Nwonu 
+Position: 1st Position
+Strength: Good in math, biology, physics, engineering
+Qualification: MSc, Bsc and PhD 
