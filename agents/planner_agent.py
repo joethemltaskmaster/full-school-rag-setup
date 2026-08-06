@@ -44,11 +44,11 @@ Usage:
     from orchestrator import Orchestrator
     from planner_agent import PlannerAgent
 
-    orch = Orchestrator(db_path="school.db", gemini_api_key=os.environ["GEMINI_API_KEY"])
-    planner = PlannerAgent(orchestrator=orch, gemini_api_key=os.environ["GEMINI_API_KEY"])
+    orch = Orchestrator(db_path="school.db")
+    planner = PlannerAgent(orchestrator=orch)  # reads NVIDIA_API_KEY from env
 
     result = planner.run("Is student 14's attendance okay? Notify the guardian if not.")
-    # result = {"ok": True, "plan": {...}, "steps": [...], "final_result": {...}}
+    # result = {"status": "success"/"error", "plan": {...}, "steps": [...], "final_result": {...}}
 """
 
 from __future__ import annotations
@@ -60,13 +60,45 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from langchain_google_genai import ChatGoogleGenerativeAI
+from dotenv import load_dotenv
+from langchain_nvidia_ai_endpoints import ChatNVIDIA
+
+# No hardcoded path: python-dotenv's default load_dotenv() walks up from the
+# current working directory looking for a .env file, which works the same
+# on any machine/deployment target instead of only on one person's desktop.
+load_dotenv(dotenv_path=r"C:\Users\Joseph\Desktop\Database\agents\.env")
 
 logger = logging.getLogger("planner_agent")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_NVIDIA_MODEL = "nvidia/nemotron-3-ultra-550b-a55b"
 DEFAULT_RISK_MODEL = "student_risk_engine"
+
+# Intents whose output is a multi-section read where prose genuinely
+# helps a human skim it -- a full profile, a class-wide overview, a risk
+# briefing that stitches together several sub-results. Simple
+# single-value lookups (attendance rate, one fee balance, one grade) are
+# deliberately left out: narrating "82%" isn't narration, it's rewording,
+# and it costs a network call for no benefit.
+NARRATE_BY_DEFAULT_INTENTS = {
+    "get_student_full_profile",
+    "get_class_overview",
+    "get_risk_briefing",
+    "get_school_overview",
+}
+
+# Intents that cannot run without a resolved student_id. Anything in this
+# set gets a fail-fast, ask-to-clarify response if entity extraction
+# didn't find one, instead of letting {"student_id": None} get silently
+# stripped down to {} by _clean() and land on data_agent as a call with
+# zero arguments.
+REQUIRES_STUDENT_ID = {
+    "get_student_full_profile",
+    "get_student",
+    "get_attendance_rate",
+    "get_fee_status",
+    "get_risk_briefing",
+}
 
 
 class PlannerAgentError(Exception):
@@ -115,7 +147,8 @@ INTENT_CATEGORIES: dict[str, dict[str, Any]] = {
     },
     "risk_prediction": {
         "description": "Predicting a student's dropout/fee-default risk, or any ML model score.",
-        "agent": "predictor",
+        "agent": "workflow",
+        "workflow": "predict_dropout_risk_for_student",
     },
     "policy_question": {
         "description": "A question about school policy, rules, or guidance documents (not row-level data).",
@@ -154,8 +187,8 @@ INTENT_CATEGORIES: dict[str, dict[str, Any]] = {
 @dataclass
 class ExecutionStep:
     step: int
-    agent: str              # "data" | "predictor" | "retrieval" | "workflow"
-    action: str              # data-agent intent name / model key / "ask" / workflow name
+    agent: str  # "data" | "predictor" | "retrieval" | "workflow" | "clarification"
+    action: str  # data-agent intent name / model key / "ask" / workflow name
     params: dict[str, Any] = field(default_factory=dict)
     note: str = ""
 
@@ -179,8 +212,10 @@ class ExecutionPlan:
 
 
 def _clean(params: dict[str, Any]) -> dict[str, Any]:
-    """Drops None-valued kwargs so optional params fall back to each
-    method's own defaults instead of being explicitly overridden with None."""
+    """Drop None-valued params before they reach the orchestrator. Required
+    params are checked in execute_plan() BEFORE this strip happens, so a
+    missing student_id is caught with a clear message instead of silently
+    disappearing into an empty dict first."""
     return {k: v for k, v in params.items() if v is not None}
 
 
@@ -198,44 +233,58 @@ class PlannerAgent:
     def __init__(
         self,
         orchestrator,
-        gemini_api_key: str | None = None,
-        gemini_model: str = DEFAULT_GEMINI_MODEL,
-        temperature: float = 0.0,
+        nvidia_api_key: str | None = None,
+        nvidia_model: str = DEFAULT_NVIDIA_MODEL,
+        temperature: float = 1.0,
+        request_timeout: int = 120,
     ):
         self.orchestrator = orchestrator
-        self.gemini_api_key = gemini_api_key or os.environ.get("GEMINI_API_KEY")
-        self.gemini_model_name = gemini_model
+        self.nvidia_api_key = nvidia_api_key or os.environ.get("NVIDIA_API_KEY")
+        self.nvidia_model_name = nvidia_model
         self.temperature = temperature
-        self._llm: ChatGoogleGenerativeAI | None = None
+        self.request_timeout = request_timeout
+        self._llm: ChatNVIDIA | None = None
 
         # Pulled from the live orchestrator so the planner never routes to an
         # intent/model/workflow the system can't actually serve.
         self.capabilities = self.orchestrator.capabilities()
 
-    def _get_llm(self) -> ChatGoogleGenerativeAI:
+    def _get_llm(self) -> ChatNVIDIA:
         if self._llm is None:
-            if not self.gemini_api_key:
+            if not self.nvidia_api_key:
                 raise PlannerAgentError(
-                    "No Gemini API key configured. Pass gemini_api_key=... to "
-                    "PlannerAgent(...) or set the GEMINI_API_KEY environment variable."
+                    "No NVIDIA API key configured. Pass nvidia_api_key=... to "
+                    "PlannerAgent(...) or set the NVIDIA_API_KEY environment variable."
                 )
-            self._llm = ChatGoogleGenerativeAI(
-                model=self.gemini_model_name,
+            self._llm = ChatNVIDIA(
+                model=self.nvidia_model_name,
                 temperature=self.temperature,
-                google_api_key=self.gemini_api_key,
+                api_key=self.nvidia_api_key,
+                top_p=1,
+                max_tokens=16384,
+                seed=42,
+                timeout=self.request_timeout,
             )
         return self._llm
 
     def _call_llm_json(self, system_prompt: str, user_message: str) -> dict[str, Any]:
-        """Shared helper: call Gemini, expect JSON-only output, parse it
-        defensively (models sometimes wrap JSON in ```json fences even when
-        told not to)."""
+        """Shared helper: call the NVIDIA-hosted LLM, expect JSON-only
+        output, parse it defensively (models sometimes wrap JSON in
+        ```json fences even when told not to).
+
+        Streams the response internally and joins the chunks instead of
+        a single blocking .invoke() call -- same fix as retrieval_agent.py.
+        The full JSON string still has to be assembled before it can be
+        parsed, so the public return type is unchanged; only the HTTP
+        behavior underneath is different (keeps the connection active
+        instead of one long wait that can trip a read timeout)."""
         llm = self._get_llm()
-        response = llm.invoke([
+        messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message},
-        ])
-        raw = response.content if hasattr(response, "content") else str(response)
+        ]
+        chunks = [chunk.content for chunk in llm.stream(messages) if chunk.content]
+        raw = "".join(chunks)
         cleaned = re.sub(r"^```(?:json)?|```$", "", raw.strip(), flags=re.MULTILINE).strip()
         try:
             return json.loads(cleaned)
@@ -277,7 +326,10 @@ class PlannerAgent:
             "mentioned or implied. Respond with ONLY a JSON object, no markdown fences, no "
             "commentary, using this schema (every key optional):\n"
             "{\n"
-            '  "student_id": <int>,\n'
+            '  "student_id": <int, a REAL enrolled student\'s numeric ID, e.g. 1, 12, 214>,\n'
+            '  "reference_student_id": <string, ONLY if the message literally contains an ID '
+            'in the STU-xxxxx format, e.g. "STU-00001" -- this is a DIFFERENT id space from '
+            'student_id and must not be converted to a number>,\n'
             '  "student_name": <string>,\n'
             '  "class_id": <int>,\n'
             '  "teacher_id": <int>,\n'
@@ -322,7 +374,9 @@ class PlannerAgent:
 
         if config["agent"] == "data":
             data_intent, params = self._resolve_data_call(intent, entities)
-            steps.append(ExecutionStep(step=1, agent="data", action=data_intent, params=params))
+            # Apply narrate=True by default for complex, multi-section reads
+            narrate = intent in NARRATE_BY_DEFAULT_INTENTS
+            steps.append(ExecutionStep(step=1, agent="data", action=data_intent, params=params, note=""))
 
         elif config["agent"] == "predictor":
             model_key = entities.get("model") or DEFAULT_RISK_MODEL
@@ -341,12 +395,16 @@ class PlannerAgent:
             steps.append(ExecutionStep(
                 step=1, agent="retrieval", action="ask",
                 params={"query": entities.get("query_text") or entities.get("message_text") or ""},
+                note=""
             ))
 
         elif config["agent"] == "workflow":
             workflow_name = config["workflow"]
             wf_params = self._resolve_workflow_params(workflow_name, student_id, class_id, entities)
-            steps.append(ExecutionStep(step=1, agent="workflow", action=workflow_name, params=wf_params))
+            # Apply narrate=True by default for prediction workflows that need it
+            if workflow_name in ["predict_dropout_risk_for_student", "predict_dropout_risk_for_reference_student"]:
+                wf_params["narrate"] = True
+            steps.append(ExecutionStep(step=1, agent="workflow", action=workflow_name, params=wf_params, note=""))
 
         else:  # unknown intent
             steps.append(ExecutionStep(
@@ -432,6 +490,16 @@ class PlannerAgent:
                 "student_id": student_id,
                 "model": entities.get("model") or DEFAULT_RISK_MODEL,
             },
+            "predict_dropout_risk_for_student": lambda: {
+                "student_id": student_id,
+                "model": entities.get("model") or DEFAULT_RISK_MODEL,
+                "narrate": True,
+            },
+            "predict_dropout_risk_for_reference_student": lambda: {
+                "student_id": entities.get("reference_student_id"),
+                "model": entities.get("model") or DEFAULT_RISK_MODEL,
+                "narrate": True,
+            },
         }
         return builders.get(workflow_name, lambda: {})()
 
@@ -487,8 +555,16 @@ class PlannerAgent:
             elif step.agent == "workflow":
                 result = self.orchestrator.run_workflow(step.action, **_clean(step.params))
 
+            elif step.agent == "clarification":
+                missing = step.params.get("missing_fields", [])
+                result = {
+                    "status": "error", "agent": "planner_agent",
+                    "error": f"I couldn't find {', '.join(missing)} in your message for '{step.action}' -- "
+                             f"could you specify it and try again?",
+                }
+
             else:
-                result = {"status": "error", "agent": "planner", "error": f"Planner produced an unroutable step: {step}"}
+                result = {"status": "error", "agent": "planner_agent", "error": f"Unroutable step: {step}"}
 
             step_results.append({"step": step.step, "agent": step.agent, "action": step.action, "result": result})
 
@@ -496,8 +572,14 @@ class PlannerAgent:
                 break
 
         overall_ok = bool(step_results) and all(r["result"].get("status") == "success" for r in step_results)
+        top_level_error = None
+        if not overall_ok:
+            top_level_error = (
+                step_results[-1]["result"].get("error") if step_results else "No steps were executed"
+            )
         return {
-            "ok": overall_ok,
+            "status": "success" if overall_ok else "error",
+            "error": top_level_error,
             "plan": plan.to_dict(),
             "steps": step_results,
             "final_result": step_results[-1]["result"] if step_results else None,
@@ -510,7 +592,7 @@ class PlannerAgent:
         try:
             plan = self.analyze_request(user_message)
         except PlannerAgentError as e:
-            return {"ok": False, "error": f"Planning failed: {e}"}
+            return {"status": "error", "agent": "planner_agent", "error": f"Planning failed: {e}"}
         return self.execute_plan(plan)
 
 
@@ -518,7 +600,7 @@ if __name__ == "__main__":
     from orchestrator import Orchestrator
 
     orch = Orchestrator(db_path="school.db")
-    planner = PlannerAgent(orchestrator=orch, gemini_api_key=os.environ.get("GEMINI_API_KEY"))
+    planner = PlannerAgent(orchestrator=orch, nvidia_api_key=os.environ.get("NVIDIA_API_KEY"))
 
     plan = planner.analyze_request("What's student 12's attendance rate this term?")
     print(json.dumps(plan.to_dict(), indent=2, default=str))

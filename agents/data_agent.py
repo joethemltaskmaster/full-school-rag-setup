@@ -73,6 +73,18 @@ class SchoolAgent:
             "get_student_timetable": self._get_student_timetable,
             "get_student_full_profile": self._get_student_full_profile,
             "get_class_overview": self._get_class_overview,
+
+            # ---- ML reference/demo tables (student_risk_records, fee_default_records) ----
+            # These are the SYNTHETIC training datasets the models were built on
+            # (STU-xxxxx IDs), not live operational students. Exposed here so
+            # they're queryable/inspectable, clearly separate from real student
+            # data -- see predict_dropout_risk_for_student on the orchestrator
+            # for real-student predictions instead.
+            "get_student_risk_record": self._get_student_risk_record,
+            "get_student_risk_records": self._get_student_risk_records,
+            "get_fee_default_record": self._get_fee_default_record,
+            "get_fee_default_records": self._get_fee_default_records,
+            "get_teacher_workload_summary": self._get_teacher_workload_summary,
         }
 
         # ---- write capabilities: mutate real data, require confirm=True ----
@@ -248,6 +260,27 @@ class SchoolAgent:
     def _get_class_overview(self, class_id: int):
         with SchoolDB(self.db_path) as db:
             return db.get_class_overview(class_id)
+
+    # ---- ML reference/demo table wrappers ----
+    def _get_student_risk_record(self, student_id: str):
+        with SchoolDB(self.db_path) as db:
+            return db.get_student_risk_record(student_id)
+
+    def _get_student_risk_records(self, risk_label: str = None):
+        with SchoolDB(self.db_path) as db:
+            return db.get_student_risk_records(risk_label=risk_label)
+
+    def _get_fee_default_record(self, student_id: str):
+        with SchoolDB(self.db_path) as db:
+            return db.get_fee_default_record(student_id)
+
+    def _get_fee_default_records(self, risk_label: str = None):
+        with SchoolDB(self.db_path) as db:
+            return db.get_fee_default_records(risk_label=risk_label)
+
+    def _get_teacher_workload_summary(self, school_id: str = None):
+        with SchoolDB(self.db_path) as db:
+            return db.get_teacher_workload_summary(school_id=school_id)
 
     # ---- write wrappers ----
     def _record_attendance(self, student_id: int, date: str, status: str, recorded_by: int = None):

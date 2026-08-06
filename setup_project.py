@@ -37,7 +37,7 @@ load_dotenv(dotenv_path=".env")
 DB_NAME = "school.db"
 MODEL_DIR = Path("model")               # what prediction_agent.py's MODEL_REGISTRY expects
 LEGACY_MODEL_DIR = Path("models")        # the earlier prototype model, kept for reference
-KNOWLEDGE_BASE_PATH = Path("school_knowledge_base.txt")
+KNOWLEDGE_BASE_PATH = Path("agents/school_knowledge_base.txt")
 
 # Where to look for the 4 ML feature CSVs, in priority order. The
 # sandbox path is specific to this Claude environment — on your own
@@ -188,7 +188,7 @@ def check_knowledge_base() -> dict:
 def check_api_key() -> dict:
     _print_header("STEP 7: GEMINI_API_KEY / GOOGLE_API_KEY (retrieval agent)")
 
-    key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    key = os.environ.get("GEMINI_API_KEY") or os.environ.get("NVIDIA_API_KEY")
     if key:
         print("Found an API key in the environment — retrieval agent can call Gemini.")
         return {"ready": True}

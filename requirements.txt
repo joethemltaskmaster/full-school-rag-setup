@@ -2,9 +2,15 @@
 pandas==3.0.2
 
 # --- Prediction agent / model training ---
-scikit-learn==1.8.0
+scikit-learn==1.6.1
+# Pinned to match the version model.joblib was trained/pickled with --
+# confirmed by testing: loading fails under 1.8.0 with
+# "Can't get attribute '_RemainderColsList' on sklearn.compose._column_transformer"
+# (an internal class that changed between versions). If you retrain the
+# model under a newer scikit-learn, bump this pin to match at the same time.
 joblib==1.5.3
 numpy==2.4.4
+langchain_nvidia_ai_endpoints
 
 # --- Retrieval agent (RAG: FAISS + Gemini) ---
 # Only required if you use the retrieval agent. Also requires the
@@ -15,5 +21,7 @@ langchain-community>=0.3.0
 langchain-huggingface>=0.1.0
 langchain-google-genai>=2.0.0
 langchain-text-splitters>=0.3.0
+sentence-transformers>=3.0.0
+python-dotenv>=1.0.0
 
 # Note: sqlite3 is part of the Python standard library — no install needed.

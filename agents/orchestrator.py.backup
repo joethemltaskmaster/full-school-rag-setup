@@ -1,28 +1,45 @@
 """
 orchestrator.py
-----------------
-Owns data_agent, prediction_agent, retrieval_agent, and narration_agent,
-and is the single point where a task dict gets routed to the right one.
 
-    task shape                                     -> agent
-    {"intent": ..., **params, "narrate": bool}      -> data_agent (+ optional narration)
-    {"model": ..., "record": {...}}                 -> prediction_agent
-    {"query": ...}                                  -> retrieval_agent
-    {"prediction": {...}}                           -> narration_agent, directly
-    {"data": {...}}                                 -> narration_agent, directly
+The execution driver for the whole platform. Holds all three agents and
+decides which one answers a given task, in what order (for multi-step
+workflows), and how their differing native responses get normalized
+into one predictable shape.
 
-NOTE: this file is reconstructed from the project narrative (previous_llm_
-responses.md) to implement the specific piece asked for -- wiring a
-`narrate` flag into the data path -- since the actual data_agent.py /
-prediction_agent.py / retrieval_agent.py implementations weren't provided.
-If your real orchestrator.py differs in shape, port `_attach_data_narration`
-and the `narrate` handling in `execute()` over rather than replacing the
-whole file.
+    orchestrator.py
+        --> data_agent.py       (SchoolAgent, via DataAgentAdapter)  --> db_service.py --> school.db
+        --> prediction_agent.py (PredictorAgentHandler)              --> trained model artifacts
+        --> retrieval_agent.py  (RetrievalAgentHandler)              --> FAISS + Gemini
+
+Why an adapter for data_agent specifically:
+    data_agent.SchoolAgent.handle() uses the signature
+    handle(intent: str, **params) -> {"ok": bool, "data"/"error": ...}
+    prediction_agent.PredictorAgentHandler and retrieval_agent.RetrievalAgentHandler
+    both use handle(task: dict) -> {"status": "success"/"error", "agent": ..., "result"/"error": ...}
+    DataAgentAdapter below wraps SchoolAgent so all three agents can be
+    called and normalized the same way, without modifying data_agent.py.
+
+Shared response shape from every agent (after normalization):
+    {"status": "success", "agent": <name>, "result": <data>}
+    {"status": "error",   "agent": <name>, "error": <message>, ...}
+
+Task-routing convention used by execute():
+    {"intent": "get_student", "student_id": 1}                        -> data agent
+    {"model": "student_risk_engine", "record": {...}}                 -> prediction agent
+    {"query": "What are the fee payment policies?"}                   -> retrieval agent
+
+Usage:
+    from orchestrator import Orchestrator
+
+    orch = Orchestrator(db_path="school.db")
+
+    orch.execute({"intent": "get_student", "student_id": 1})
+    orch.execute({"model": "student_risk_engine", "record": {...}})
+    orch.execute({"query": "What are the fee payment policies?"})
+
+    orch.run_workflow("student_report", student_id=1)
 """
 
-from __future__ import annotations
-
-import logging
 from typing import Any
 
 from data_agent import SchoolAgent
@@ -30,8 +47,6 @@ from prediction_agent import PredictorAgentHandler, MODEL_REGISTRY
 from retrieval_agent import RetrievalAgentHandler, OrchestratorAgentInterface
 from narration_agent import NarrationAgentHandler
 from student_feature_bridge import build_risk_features
-
-logger = logging.getLogger("orchestrator")
 
 
 # =====================================================================
@@ -79,62 +94,62 @@ class Orchestrator:
         self.data_agent = DataAgentAdapter(db_path)
         self.prediction_agent = PredictorAgentHandler(predictor_registry or MODEL_REGISTRY)
         self.retrieval_agent = RetrievalAgentHandler(knowledge_base_path)
-        # Lazy: only spin up the NVIDIA client the first time something
-        # actually needs narration, not on every orchestrator startup.
-        self._narration_agent: NarrationAgentHandler | None = None
+        self.narration_agent = NarrationAgentHandler()
 
-    @property
-    def narration_agent(self) -> NarrationAgentHandler:
-        if self._narration_agent is None:
-            self._narration_agent = NarrationAgentHandler()
-        return self._narration_agent
-
-    def capabilities(self) -> dict:
-        return {
-            "data_agent": getattr(self.data_agent, "capabilities", lambda: [])(),
-            "prediction_agent": getattr(self.prediction_agent, "capabilities", lambda: [])(),
-            "retrieval_agent": getattr(self.retrieval_agent, "capabilities", lambda: [])(),
-            "narration_agent": ["narrate_prediction", "narrate_data"],
-        }
-
+    # =================================================================
+    # SINGLE-STEP EXECUTION — routes a task dict to the right agent
+    # =================================================================
     def execute(self, task: dict[str, Any]) -> dict[str, Any]:
-        """Single entry point for both the planner and the CLI's :raw
-        escape hatch."""
-        task = dict(task)  # don't mutate the caller's dict
-        narrate = bool(task.pop("narrate", False))
-
+        """
+        Routes a task to whichever agent owns it, based on which key is
+        present ("intent", "model", or "query"), and returns that
+        agent's response as-is — all three already share the same
+        {"status", "agent", "result"/"error"} shape.
+        """
         if "intent" in task:
-            result = self.data_agent.handle(task)
-            if result.get("status") == "success" and narrate:
-                result = self._attach_data_narration(result, context=task["intent"])
-            return result
-
+            return self.data_agent.handle(task)
         if "model" in task:
             return self.prediction_agent.handle(task)
-
         if "query" in task:
             return self.retrieval_agent.handle(task)
-
-        if "prediction" in task or "data" in task:
+        if "prediction" in task:
             return self.narration_agent.handle(task)
 
         return {
             "status": "error",
-            "error": f"Could not route task, unrecognized shape: {list(task.keys())}",
+            "agent": "orchestrator",
+            "error": "Could not determine target agent — include 'intent', 'model', 'query', or 'prediction' in the task.",
+            "capabilities": self.capabilities(),
         }
 
+    def capabilities(self) -> dict[str, Any]:
+        """What can this orchestrator ask its four agents to do?"""
+        return {
+            "data_agent": self.data_agent.list_intents(),
+            "prediction_agent": {
+                "registered_models": list(self.prediction_agent.registry.keys()),
+                "task_shape": {"model": "<model_key>", "record": {"...": "..."}},
+            },
+            "retrieval_agent": {
+                "description": "Ask natural-language questions against the school knowledge base.",
+                "task_shape": {"query": "<question>"},
+            },
+            "narration_agent": {
+                "description": "Turns a prediction_agent result into a natural-language paragraph.",
+                "task_shape": {"prediction": {"...": "..."}},
+            },
+        }
+
+    # -- convenience wrapper for internal workflow use --
+    def _data(self, intent: str, **params) -> dict[str, Any]:
+        return self.execute({"intent": intent, **params})
+
+    # =================================================================
+    # MULTI-STEP WORKFLOWS
+    # The orchestrator composes several agent calls — the agents
+    # themselves have no notion of a "workflow."
+    # =================================================================
     def run_workflow(self, workflow_name: str, **params) -> dict[str, Any]:
-        """Execute a named workflow with optional narration.
-
-        Args:
-            workflow_name: Name of the workflow to execute
-            **params: Workflow-specific parameters
-            narrate: Optional boolean flag to add narration to workflow result
-
-        Returns:
-            Workflow result dict, optionally enhanced with narration
-        """
-        narrate = bool(params.pop("narrate", False))
         workflows = {
             "student_report": self._workflow_student_report,
             "class_report": self._workflow_class_report,
@@ -147,107 +162,13 @@ class Orchestrator:
         }
         fn = workflows.get(workflow_name)
         if fn is None:
-            result = {
+            return {
                 "status": "error",
                 "agent": "orchestrator",
                 "error": f"Unknown workflow '{workflow_name}'",
                 "available_workflows": sorted(workflows.keys()),
             }
-        else:
-            result = fn(**params)
-
-        # Apply narration to workflow results if requested
-        if narrate and result.get("status") == "success":
-            result = self._attach_workflow_narration(result, workflow_name)
-
-        return result
-
-    def _attach_workflow_narration(self, result: dict[str, Any], workflow_name: str) -> dict[str, Any]:
-        """
-        Best-effort narration of a successful workflow result.
-
-        Narration is enrichment, never a gate: the data the caller actually
-        asked for is already sitting in `result["result"]`, untouched, by
-        the time this runs. If narration succeeds, a "narrative" key is
-        added alongside it. If narration fails for any reason (missing
-        NVIDIA_API_KEY, network error, timeout, whatever) a
-        "narrative_error" key is added instead -- the original data is
-        never dropped, mutated, or blocked on this call, and the overall
-        `status` this function returns stays "success", because the thing
-        that was asked for (the data) was delivered correctly regardless
-        of whether the prose summary could be generated.
-        """
-        payload = result.get("result", {})
-        try:
-            # Create a context that describes what kind of workflow result this is
-            context_mapping = {
-                "student_report": "student report",
-                "class_report": "class report",
-                "attendance_check_and_notify": "attendance check and notification",
-                "ask_knowledge_base": "knowledge base query",
-                "predict_dropout_risk": "dropout risk prediction",
-                "predict_dropout_risk_for_student": "student dropout risk prediction",
-                "predict_dropout_risk_for_reference_student": "reference student dropout risk prediction",
-                "at_risk_briefing": "risk briefing",
-            }
-            context = context_mapping.get(workflow_name, workflow_name)
-
-            narration_outcome = self.narration_agent.handle({"data": payload, "context": context})
-        except Exception as exc:  # belt-and-braces: handler already catches internally,
-            # but this path must never be allowed to take the data down with it.
-            logger.exception("Narration call raised outside NarrationAgentHandler")
-            narration_outcome = {"status": "error", "error": str(exc)}
-
-        if narration_outcome.get("status") == "success":
-            payload["narrative"] = narration_outcome["result"]["narrative"]
-        else:
-            payload["narrative_error"] = narration_outcome.get(
-                "error", "Narration failed for an unknown reason."
-            )
-
-        result["result"] = payload
-        return result
-
-    def _attach_data_narration(self, result: dict[str, Any], context: str | None = None) -> dict[str, Any]:
-        """
-        Best-effort narration of a successful data_agent result.
-
-        Narration is enrichment, never a gate: the data the caller actually
-        asked for is already sitting in `result["result"]`, untouched, by
-        the time this runs. If narration succeeds, a "narrative" key is
-        added alongside it. If narration fails for any reason (missing
-        NVIDIA_API_KEY, network error, timeout, whatever) a
-        "narrative_error" key is added instead -- the original data is
-        never dropped, mutated, or blocked on this call, and the overall
-        `status` this function returns stays "success", because the thing
-        that was asked for (the data) was delivered correctly regardless
-        of whether the prose summary could be generated.
-        """
-        payload = result.get("result", {})
-        try:
-            narration_outcome = self.narration_agent.handle({"data": payload, "context": context})
-        except Exception as exc:  # belt-and-braces: handler already catches internally,
-            # but this path must never be allowed to take the data down with it.
-            logger.exception("Narration call raised outside NarrationAgentHandler")
-            narration_outcome = {"status": "error", "error": str(exc)}
-
-        if narration_outcome.get("status") == "success":
-            payload["narrative"] = narration_outcome["result"]["narrative"]
-        else:
-            payload["narrative_error"] = narration_outcome.get(
-                "error", "Narration failed for an unknown reason."
-            )
-
-        result["result"] = payload
-        return result
-
-    # =================================================================
-    # MULTI-STEP WORKFLOWS
-    # The orchestrator composes several agent calls — the agents
-    # themselves have no notion of a "workflow."
-    # =================================================================
-    def _data(self, intent: str, **params) -> dict[str, Any]:
-        return self.execute({"intent": intent, **params})
+        return fn(**params)
 
     def _workflow_student_report(self, student_id: int) -> dict[str, Any]:
         """Pulls together a full picture of one student from several data-agent intents."""
