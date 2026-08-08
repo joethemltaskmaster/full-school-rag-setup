@@ -35,10 +35,20 @@ get_class_timetable / get_teacher_schedule. The planner treats
 the data agent like any other read, same as attendance, scores, or fees.
 
 Compatible with orchestrator.py as provided: every step the planner
-emits maps onto Orchestrator's actual public interface -- a single
-execute(task_dict) that routes on the "intent" / "model" / "query" key,
-plus run_workflow(name, **params) for multi-step workflows -- no
-changes to Orchestrator are required.
+emits maps onto Orchestrator's actual interface --
+execute({"intent"/"model"/"query": ...}) and run_workflow(name, **params) --
+and every result is read back in Orchestrator's real
+{"status", "agent", "result"/"error"} shape, not an "ok"/"data" shape.
+
+LLM backend: NVIDIA-hosted inference (ChatNVIDIA / NIM), not Gemini.
+Both LLM calls (identify_intent, extract_entities) internally stream the
+response and join the chunks, rather than blocking on .invoke() -- same
+fix applied in retrieval_agent.py: a blocking call waits for the ENTIRE
+response before anything comes back, which is what was producing 60s
+read-timeout errors. Streaming keeps the connection active token by
+token instead of one long silent wait. The public methods still return
+one complete parsed dict, since JSON needs to be fully received before
+it can be parsed anyway -- only the underlying HTTP behavior changed.
 
 Usage:
     from orchestrator import Orchestrator
@@ -59,46 +69,20 @@ import os
 import re
 from dataclasses import dataclass, field
 from typing import Any
-
 from dotenv import load_dotenv
-from langchain_nvidia_ai_endpoints import ChatNVIDIA
 
 # No hardcoded path: python-dotenv's default load_dotenv() walks up from the
 # current working directory looking for a .env file, which works the same
 # on any machine/deployment target instead of only on one person's desktop.
 load_dotenv(dotenv_path=r"C:\Users\Joseph\Desktop\Database\agents\.env")
 
+from langchain_nvidia_ai_endpoints import ChatNVIDIA
+
 logger = logging.getLogger("planner_agent")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 
 DEFAULT_NVIDIA_MODEL = "nvidia/nemotron-3-ultra-550b-a55b"
 DEFAULT_RISK_MODEL = "student_risk_engine"
-
-# Intents whose output is a multi-section read where prose genuinely
-# helps a human skim it -- a full profile, a class-wide overview, a risk
-# briefing that stitches together several sub-results. Simple
-# single-value lookups (attendance rate, one fee balance, one grade) are
-# deliberately left out: narrating "82%" isn't narration, it's rewording,
-# and it costs a network call for no benefit.
-NARRATE_BY_DEFAULT_INTENTS = {
-    "get_student_full_profile",
-    "get_class_overview",
-    "get_risk_briefing",
-    "get_school_overview",
-}
-
-# Intents that cannot run without a resolved student_id. Anything in this
-# set gets a fail-fast, ask-to-clarify response if entity extraction
-# didn't find one, instead of letting {"student_id": None} get silently
-# stripped down to {} by _clean() and land on data_agent as a call with
-# zero arguments.
-REQUIRES_STUDENT_ID = {
-    "get_student_full_profile",
-    "get_student",
-    "get_attendance_rate",
-    "get_fee_status",
-    "get_risk_briefing",
-}
 
 
 class PlannerAgentError(Exception):
@@ -212,11 +196,46 @@ class ExecutionPlan:
 
 
 def _clean(params: dict[str, Any]) -> dict[str, Any]:
-    """Drop None-valued params before they reach the orchestrator. Required
-    params are checked in execute_plan() BEFORE this strip happens, so a
-    missing student_id is caught with a clear message instead of silently
-    disappearing into an empty dict first."""
+    """Drops None-valued kwargs so optional params fall back to each
+    method's own defaults instead of being explicitly overridden with None."""
     return {k: v for k, v in params.items() if v is not None}
+
+
+# Params that MUST be present (non-None) for a given data intent to
+# succeed. Checked BEFORE calling the orchestrator, so a missing required
+# value produces one clear, actionable message ("I couldn't find a
+# student_id...") instead of letting _clean() silently drop it and having
+# it surface several layers down as a raw Python TypeError from
+# data_agent's argument binding.
+REQUIRED_DATA_PARAMS: dict[str, list[str]] = {
+    "get_student_full_profile": ["student_id"],
+    "get_student": ["student_id"],
+    "get_attendance_summary": ["student_id"],
+    "get_score_summary": ["student_id"],
+    "get_fee_balance": ["student_id"],
+    "get_student_timetable": ["student_id"],
+    "get_student_messages": ["student_id"],
+    "get_class_overview": ["class_id"],
+    "get_class": ["class_id"],
+    "get_class_students": ["class_id"],
+    "get_class_timetable": ["class_id"],
+    "get_class_average_scores": ["class_id"],
+    "get_teacher": ["teacher_id"],
+    "get_teacher_schedule": ["teacher_id"],
+    "get_guardian": ["guardian_id"],
+    "get_guardian_messages": ["guardian_id"],
+    "search_students": ["name_query"],
+}
+
+REQUIRED_WORKFLOW_PARAMS: dict[str, list[str]] = {
+    "student_report": ["student_id"],
+    "class_report": ["class_id"],
+    "attendance_check_and_notify": ["student_id"],
+    "predict_dropout_risk_for_student": ["student_id"],
+    "predict_dropout_risk_for_reference_student": ["student_id"],
+    # at_risk_briefing is handled separately below -- it needs EITHER
+    # student_id OR reference_student_id, not a fixed required list.
+}
 
 
 class PlannerAgent:
@@ -358,7 +377,8 @@ class PlannerAgent:
     # 3. AGENT SELECTION, ORDERING & PARAMETER WIRING (rule-based)
     # =================================================================
     def create_execution_plan(self, intent: str, entities: dict[str, Any],
-                               confidence: float = 0.0, reasoning: str = "") -> ExecutionPlan:
+                               confidence: float = 0.0, reasoning: str = "",
+                               user_message: str = "") -> ExecutionPlan:
         """
         Deterministic by design: intent recognition and entity extraction
         already spent an LLM call each understanding the *request*. Turning
@@ -374,9 +394,15 @@ class PlannerAgent:
 
         if config["agent"] == "data":
             data_intent, params = self._resolve_data_call(intent, entities)
-            # Apply narrate=True by default for complex, multi-section reads
-            narrate = intent in NARRATE_BY_DEFAULT_INTENTS
-            steps.append(ExecutionStep(step=1, agent="data", action=data_intent, params=params, note=""))
+            missing = [f for f in REQUIRED_DATA_PARAMS.get(data_intent, []) if params.get(f) is None]
+            if missing:
+                steps.append(ExecutionStep(
+                    step=1, agent="clarification", action=data_intent,
+                    params={"missing_fields": missing},
+                    note=f"Required for '{data_intent}' but not found in the message: {', '.join(missing)}",
+                ))
+            else:
+                steps.append(ExecutionStep(step=1, agent="data", action=data_intent, params=params))
 
         elif config["agent"] == "predictor":
             model_key = entities.get("model") or DEFAULT_RISK_MODEL
@@ -394,22 +420,40 @@ class PlannerAgent:
         elif config["agent"] == "retrieval":
             steps.append(ExecutionStep(
                 step=1, agent="retrieval", action="ask",
-                params={"query": entities.get("query_text") or entities.get("message_text") or ""},
-                note=""
+                params={"query": entities.get("query_text") or entities.get("message_text") or user_message},
             ))
 
         elif config["agent"] == "workflow":
             workflow_name = config["workflow"]
+            reference_id = entities.get("reference_student_id")
+            # A STU-xxxxx id means "score the synthetic reference dataset", not
+            # a real operational student -- route to the matching workflow
+            # instead of silently coercing it into an integer student_id.
+            if reference_id and workflow_name == "predict_dropout_risk_for_student":
+                workflow_name = "predict_dropout_risk_for_reference_student"
+            elif reference_id and workflow_name == "at_risk_briefing":
+                pass  # at_risk_briefing itself branches on reference_student_id vs student_id
             wf_params = self._resolve_workflow_params(workflow_name, student_id, class_id, entities)
-            # Apply narrate=True by default for prediction workflows that need it
-            if workflow_name in ["predict_dropout_risk_for_student", "predict_dropout_risk_for_reference_student"]:
-                wf_params["narrate"] = True
-            steps.append(ExecutionStep(step=1, agent="workflow", action=workflow_name, params=wf_params, note=""))
+
+            if workflow_name == "at_risk_briefing":
+                missing = [] if (wf_params.get("student_id") or wf_params.get("reference_student_id")) \
+                    else ["student_id or reference_student_id"]
+            else:
+                missing = [f for f in REQUIRED_WORKFLOW_PARAMS.get(workflow_name, []) if wf_params.get(f) is None]
+
+            if missing:
+                steps.append(ExecutionStep(
+                    step=1, agent="clarification", action=workflow_name,
+                    params={"missing_fields": missing},
+                    note=f"Required for '{workflow_name}' but not found in the message: {', '.join(missing)}",
+                ))
+            else:
+                steps.append(ExecutionStep(step=1, agent="workflow", action=workflow_name, params=wf_params))
 
         else:  # unknown intent
             steps.append(ExecutionStep(
                 step=1, agent="retrieval", action="ask",
-                params={"query": entities.get("query_text") or ""},
+                params={"query": entities.get("query_text") or user_message},
                 note="Intent unrecognized -- falling back to a general RAG lookup.",
             ))
 
@@ -427,7 +471,7 @@ class PlannerAgent:
         guardian_id = entities.get("guardian_id")
 
         if intent == "student_lookup":
-            return "get_student_full_profile", {"student_id": student_id}
+            return "get_student_full_profile", {"student_id": student_id, "narrate": True}
 
         if intent == "student_search":
             if entities.get("student_name"):
@@ -472,7 +516,7 @@ class PlannerAgent:
             return "get_guardian_messages", {"guardian_id": guardian_id}
 
         if intent == "class_overview":
-            return "get_class_overview", {"class_id": class_id}
+            return "get_class_overview", {"class_id": class_id, "narrate": True}
 
         return "get_student", {"student_id": student_id}
 
@@ -486,10 +530,12 @@ class PlannerAgent:
                 "low_attendance_threshold": entities.get("threshold"),
                 "confirm": entities.get("confirm", False),
             },
-            "at_risk_briefing": lambda: {
-                "student_id": student_id,
-                "model": entities.get("model") or DEFAULT_RISK_MODEL,
-            },
+            "at_risk_briefing": lambda: (
+                {"reference_student_id": entities.get("reference_student_id"),
+                 "model": entities.get("model") or DEFAULT_RISK_MODEL}
+                if entities.get("reference_student_id")
+                else {"student_id": student_id, "model": entities.get("model") or DEFAULT_RISK_MODEL}
+            ),
             "predict_dropout_risk_for_student": lambda: {
                 "student_id": student_id,
                 "model": entities.get("model") or DEFAULT_RISK_MODEL,
@@ -516,6 +562,7 @@ class PlannerAgent:
             entities=entities,
             confidence=intent_result["confidence"],
             reasoning=intent_result["reasoning"],
+            user_message=user_message,
         )
 
     # =================================================================
@@ -523,10 +570,15 @@ class PlannerAgent:
     # =================================================================
     def execute_plan(self, plan: ExecutionPlan) -> dict[str, Any]:
         """Runs each step of the plan through self.orchestrator, in order,
-        threading output from earlier steps into later ones where needed
-        (e.g. a data-agent fetch feeding the predictor's 'record' arg).
+        threading output from earlier steps into later ones where needed.
         Stops at the first failed step rather than cascading bad data
-        forward into later steps."""
+        forward into later steps.
+
+        Every step result comes back in the orchestrator's actual shape:
+        {"status": "success"/"error", "agent": ..., "result"/"error": ...}
+        -- this method never assumes an "ok"/"data" shape that Orchestrator
+        doesn't produce.
+        """
         step_results: list[dict[str, Any]] = []
         last_data_result: Any = None
 
@@ -541,16 +593,14 @@ class PlannerAgent:
                 record = last_data_result if isinstance(last_data_result, dict) else None
                 if record is None:
                     result = {
-                        "status": "error", "agent": "prediction_agent",
-                        "error": "No upstream student record available to build features from.",
+                        "status": "error", "agent": "predictor_agent",
+                        "error": "No upstream record available to build features from.",
                     }
                 else:
-                    task = {"model": step.action, "record": record}
-                    result = self.orchestrator.execute(task)
+                    result = self.orchestrator.execute({"model": step.action, "record": record})
 
             elif step.agent == "retrieval":
-                task = {"query": step.params.get("query", "")}
-                result = self.orchestrator.execute(task)
+                result = self.orchestrator.execute({"query": step.params.get("query", "")})
 
             elif step.agent == "workflow":
                 result = self.orchestrator.run_workflow(step.action, **_clean(step.params))

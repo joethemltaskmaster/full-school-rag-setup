@@ -1,7 +1,179 @@
-This is a sample document for our RAG system. It contains some information that we want to retrieve later. LangChain provides many useful tools for building LLM applications. We are using FAISS for efficient similarity search on our embeddings. The HuggingFaceEmbeddings model converts text into numerical vectors. This setup is designed to be compatible with Google Gemini API integration in future steps. 
+INSTITUTIONAL OPERATIONAL FRAMEWORK: SCHOOL POLICY, ATTENDANCE HANDBOOK, INTERVENTION GUIDE & COUNSELLING PROCEDURES
 
-Details:
-Student_name: Gregory Ogwuche Nwonu 
-Position: 1st Position
-Strength: Good in math, biology, physics, engineering
-Qualification: MSc, Bsc and PhD 
+SECTION 1: INSTITUTIONAL SCHOOL POLICY
+
+1.1 Academic & Termly Governance
+
+* Term Structure: The academic session operates on a 13-week termly structure split across three terms (First Term: September–December; Second Term: January–April; Third Term: April–July).
+* Instructional Hours: The operational school day runs from 07:45 AM to 03:30 PM, Monday through Friday. A standard day is partitioned into 6 instructional periods of 40 minutes each, alongside morning assembly (20 minutes), mid-morning short break (20 minutes), and long lunch break (45 minutes).
+* Class Arm Organization: Classes are structured sequentially from Junior Secondary (JSS1–JSS3) to Senior Secondary (SS1–SS3), partitioned into distinct arm designations (e.g., SS3A, SS3B). Class arm sizes must not exceed 35 students per arm for general subjects and 25 students per arm for technical/laboratory sessions.
+
+1.2 Faculty Roles & Persona-Based Operational Guidelines
+
+To balance operational efficiency with human retention, academic workload distribution is governed by persona-specific operational constraints:
+
+Staff Persona Category: Overworked Generalist
+Contractual Profile: Full-time staff assigned across multiple lower/middle school subjects (e.g., PHE, Basic Tech, CRS).
+Daily/Weekly Max Load: Max 5 periods/day; Max 22 periods/week.
+Specific Scheduling Policy & Constraints: Mandatory 1-period rest buffer after 3 consecutive periods. Core morning slots preferred; total consecutive teaching must never exceed 3 periods in afternoon sessions.
+
+Staff Persona Category: Hustling Subject Specialist
+Contractual Profile: Part-time / Multi-school specialist (e.g., Physics, Further Math).
+Daily/Weekly Max Load: Max 3 periods/day; Contracted morning windows.
+Specific Scheduling Policy & Constraints: Strictly scheduled within fixed window (08:00 AM – 11:00 AM). Must be granted zero afternoon periods on days with cross-city travel demands to accommodate urban transit delays.
+
+Staff Persona Category: NYSC Corper
+Contractual Profile: National Youth Service Corps primary assignment staff.
+Daily/Weekly Max Load: Max 3 periods/day; Max 14 periods/week.
+Specific Scheduling Policy & Constraints: Zero lecture allocation on designated CDS (Community Development Service) days. Assigned single or double period blocks; strictly prohibited from handling final-period senior exam prep arms without co-teacher oversight.
+
+Staff Persona Category: Veteran Staff / Room Boss
+Contractual Profile: Senior full-time staff / HODs with high tenure.
+Daily/Weekly Max Load: Max 4 periods/day; Max 16 periods/week.
+Specific Scheduling Policy & Constraints: Priority morning placement (08:30 AM – 10:30 AM). Assigned fixed master classrooms; exempt from floating across junior arms unless conducting supervisory audits.
+
+1.3 Infrastructure & Facility Usage Policy
+
+* Laboratory & Specialized Room Matching: Science subjects (Physics, Chemistry, Biology), Computer Studies, and Technical Drawing must hold practical sessions in designated laboratory facilities. Holding practical lectures in standard homeroom spaces constitutes a Class A Infrastructure Breakdown.
+* Power & Generator Synchronized Scheduling: Computer Studies, Audio-Visual, and Science Laboratory sessions requiring heavy electrification must be clustered during scheduled generator power windows (09:30 AM – 01:30 PM) to optimize fuel efficiency and prevent lesson abandonment due to power outages.
+* Room Capacity Enforcement: Floating classes must not exceed the physical seating capacity of specialized laboratories. Over-capacity transfers require prior written sign-off from the Vice Principal (Academics).
+
+SECTION 2: COMPREHENSIVE ATTENDANCE HANDBOOK
+
+2.1 Student Attendance Framework
+
+* Mandatory Attendance Threshold: Students are required to maintain a minimum of 85% verified attendance across all scheduled subject periods per term to remain eligible for end-of-term examinations and external registration (BECE, WAEC, NECO).
+* Daily Roll Call Procedure:
+1. Morning Assembly Registration (07:45 AM – 08:05 AM): Form Tutors execute physical attendance logging in the Master Class Register.
+2. Period-by-Period Audit: Class Captains maintain a physical Period Logbook. Subject teachers sign the logbook at the start and end of every period.
+3. Digital Reconciliation: Form Tutors transcribe daily physical logs into the school database by 02:00 PM daily.
+
+
+
+Daily Attendance Reconciliation Pipeline:
+07:45 AM: Assembly Roll Call (Form Tutor)
+->
+Period 1–6: Class Captain Logbook Entry & Teacher Signature
+->
+02:00 PM: Digital System Entry & Discrepancy Flagging
+->
+03:30 PM: Automated SMS Notification to Parents of Absentee Students
+
+* Absence Classification:
+* Authorized Absence: Medical illness (supported by a licensed clinic medical certificate), family bereavement, or officially sanctioned inter-school competitions.
+* Unauthorized Absence (Truancy): Unexcused non-attendance, skipping specific subject periods while present on school grounds, or arriving 20+ minutes late without a pass.
+
+
+
+2.2 Faculty Attendance, Punctuality & Mobility Management
+
+* Clock-In Mandate: All full-time faculty must physically or digitally clock in before 07:30 AM. Part-time specialists must clock in at least 15 minutes prior to their contracted period window.
+* Period Attendance Verification: A teacher is marked as Present and Active when they enter the assigned room within 5 minutes of the period bell. Arriving 10+ minutes late constitutes Unexcused Tardiness.
+* Off-Site & CDS Tracking: NYSC Corpers must submit their official Local Government CDS clearance schedules at the start of each term. Absence from school on non-CDS days without an approved leave request is treated as an unexcused absence, resulting in formal allowance deductions.
+
+SECTION 3: RISK-BASED INTERVENTION GUIDE
+
+3.1 Multi-Tiered Intervention System (MTIS)
+
+To prevent operational breakdown, schedule friction, and student absenteeism, the institution uses a 3-tier risk-scoring model based on predictive indicators (e.g., teacher exhaustion score, soft preference violation, consecutive teaching load, travel overlap).
+
+Tier Structure:
+
+* TIER 3: CRITICAL INTERVENTION (Risk Score > 0.50)
+* Unexcused Period Skips, CDS Clashes, Room Mismatches
+* Immediate Admin Override & Formal Disciplinary Review
+
+
+* TIER 2: EARLY WARNING (Risk Score 0.20 – 0.50)
+* Fatigue Accumulation (4+ periods), Minor Tardiness
+* HOD Timetable Adjustment & Proactive Wellness Check
+
+
+* TIER 1: ROUTINE MONITORING (Risk Score < 0.20)
+* Standard Operational Execution & Routine Automated Tracking
+
+
+
+3.2 Incident Escalation Matrix
+
+Trigger Condition: Soft Preference Score Dropping Below -4.0
+Risk Level: Tier 2
+Responsible Authority: HOD / Timetable Committee
+Turnaround Window: 24 Hours
+Required Action: Re-evaluate scheduling parameters; adjust consecutive period counts or shift late afternoon slots to morning windows.
+
+Trigger Condition: Consecutive Periods >= 4 for Overworked Generalist
+Risk Level: Tier 2
+Responsible Authority: Vice Principal (Academics)
+Turnaround Window: Same Day
+Required Action: Assign an Assistant Teacher or Intern to period 3 or 4 to share the teaching load; force a 40-minute rest buffer.
+
+Trigger Condition: NYSC Corper Scheduled on CDS Blocked Day
+Risk Level: Tier 3
+Responsible Authority: Timetable Admin / Core Optimizer
+Turnaround Window: Immediate (<2 Hours)
+Required Action: Hard Constraint Override: Instantly remove Corper from schedule on CDS day; reallocate load to a floating generalist.
+
+Trigger Condition: Unexcused Teacher Absence / Skipping Period
+Risk Level: Tier 3
+Responsible Authority: Principal / Disciplinary Panel
+Turnaround Window: 4 Hours
+Required Action: Deploy emergency internal substitute cover; issue formal query to teacher; log incident in termly performance file.
+
+Trigger Condition: Student Class-Skipping (Subject Truancy)
+Risk Level: Tier 2
+Responsible Authority: Guidance Counsellor / Form Tutor
+Turnaround Window: 12 Hours
+Required Action: Issue Student Warning Pass; notify parents via SMS; schedule compulsory counselling session before next subject class.
+
+Trigger Condition: Student Cumulative Attendance < 85%
+Risk Level: Tier 3
+Responsible Authority: VP Academics / Parent Board
+Turnaround Window: 48 Hours
+Required Action: Issue formal Examination Barring Warning; mandatory parent-principal conference; place student on Academic Probation.
+
+3.3 Operational Protocol for Schedule Friction
+
+1. Detection: The system flags a high risk score (>= 0.50) or a physical clash occurs during daily execution.
+2. Containment: The HOD immediately pulls from the Floating Substitute Pool (unassigned generalists or intern teachers) to ensure the classroom is supervised and instructed.
+3. Root-Cause Remediation:
+* If caused by transit delays (Part-time specialist), shift the specialist’s classes to a single-block morning setup.
+* If caused by facility conflict (e.g., dual lab booking), move the non-practical component of the curriculum to the homeroom and reschedule the practical lab for off-peak hours.
+
+
+
+SECTION 4: COUNSELLING & SUPPORT PROCEDURES
+
+4.1 Faculty Wellness & Burnout Mitigation
+
+* Burnout Screening: Faculty members identified with continuous high exhaustion indices (e.g., teaching 20+ periods/week across 3+ subjects) undergo mandatory bi-weekly wellness evaluations by the Guidance and Counselling Department.
+* Workload Re-balancing: Upon counsellor recommendation, the Vice Principal (Academics) must reassign up to 20% of the affected teacher's load to intern teachers or re-adjust class arm allocations.
+* De-escalation & Mental Health Support: Teachers experiencing acute stress, personal crises, or burnout are granted up to 3 days of paid compassionate wellness leave, supported by confidential professional counselling resources.
+
+4.2 Student Academic & Behavioral Counselling
+
+* Truancy & Discipline Intake: Students flagged for Tier 2 or Tier 3 attendance infractions are referred to the Counselling Unit rather than subjected strictly to punitive measures.
+
+Student Behavioral Counselling Workflow:
+Attendance Flag (Infraction logged)
+->
+Phase 1: Initial Diagnostic Intake (Identify root causes: home environment, learning difficulty, peer pressure)
+->
+Phase 2: Individualized Behavioral Plan (IBP) (Set attendance targets, daily check-ins with Counsellor)
+->
+Phase 3: Parental Alignment Conference (Formulate home-school compliance agreement)
+->
+Phase 4: Bi-Weekly Monitoring & Progress Sign-Off (Minimum 4 weeks)
+
+* Career & Academic Guidance: Senior secondary students (SS1–SS3) receive structured counseling regarding subject selection (Sciences, Arts, Commercial), study habits, and national exam preparation (WAEC/NECO/UTME) to reduce academic anxiety.
+
+4.3 Conflict Mediation & Grievance Standards
+
+* Teacher-Administration Disputes: Disputes regarding timetable placements, room allocations, or unfair workload distributions must be lodged in writing using the Staff Grievance Form.
+* Mediation Process:
+1. Stage 1 (Informal): Direct dialogue between Teacher and HOD within 48 hours.
+2. Stage 2 (Formal Mediation): Meeting convened by the Guidance Counsellor, Vice Principal, and affected staff member within 3 business days.
+3. Stage 3 (Final Resolution): The Principal issues a binding operational decision that balances teacher well-being with institutional integrity.
+
+
+* Confidentiality Standard: All counselling records, psychological evaluations, and grievance proceedings must be kept strictly confidential in locked physical vaults and encrypted digital directories accessible only by authorized personnel.
