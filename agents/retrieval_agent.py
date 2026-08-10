@@ -8,7 +8,6 @@ Combines a FAISS vector store (built from a school knowledge-base text
 file) with an NVIDIA-hosted LLM (via NIM / ChatNVIDIA) to answer
 natural-language questions grounded in that document set.
 
-Constantly
 
 Unlike data_agent.py and prediction_agent.py, this agent DOES depend on
 external services:
