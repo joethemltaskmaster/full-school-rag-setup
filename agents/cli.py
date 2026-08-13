@@ -102,16 +102,33 @@ def render_result(response: dict) -> None:
 def _find_narrative(data) -> str | None:
     """Narratives can show up at different nesting depths depending on
     which workflow ran (a plain prediction vs. a briefing that wraps a
-    prediction). Check the common spots rather than assuming one shape."""
+    prediction), or under a different key entirely for the retrieval
+    agent ('answer' instead of 'narrative' -- it's already natural
+    language from an LLM call, just never labeled the same way the
+    narration agent labels its own output). Check the common spots
+    rather than assuming one shape.
+
+    at_risk_briefing is a special case: it has BOTH a risk narrative
+    (the primary answer) and separate RAG guidance (supplementary) --
+    these get combined into one readable briefing rather than one
+    silently overriding the other."""
     if not isinstance(data, dict):
         return None
+
+    risk = data.get("risk_assessment")
+    guidance = data.get("recommended_guidance")
+    if isinstance(risk, dict) or isinstance(guidance, dict):
+        risk_narrative = _find_narrative(risk) if isinstance(risk, dict) else None
+        guidance_answer = guidance.get("answer") if isinstance(guidance, dict) else None
+        parts = [p for p in (risk_narrative, guidance_answer) if p]
+        return "\n\n".join(parts) if parts else None
+
     if "narrative" in data:
         return data["narrative"]
+    if "answer" in data:  # retrieval_agent's result -- already prose, no narration_agent needed
+        return data["answer"]
     if isinstance(data.get("prediction"), dict) and "narrative" in data["prediction"]:
         return data["prediction"]["narrative"]
-    risk = data.get("risk_assessment")
-    if isinstance(risk, dict):
-        return _find_narrative(risk)
     return None
 
 

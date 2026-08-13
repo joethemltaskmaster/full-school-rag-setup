@@ -286,7 +286,7 @@ class PlannerAgent:
             )
         return self._llm
 
-    def _call_llm_json(self, system_prompt: str, user_message: str) -> dict[str, Any]:
+    def _call_llm_json(self, system_prompt: str, user_message: str, _retries: int = 1) -> dict[str, Any]:
         """Shared helper: call the NVIDIA-hosted LLM, expect JSON-only
         output, parse it defensively (models sometimes wrap JSON in
         ```json fences even when told not to).
@@ -296,7 +296,18 @@ class PlannerAgent:
         The full JSON string still has to be assembled before it can be
         parsed, so the public return type is unchanged; only the HTTP
         behavior underneath is different (keeps the connection active
-        instead of one long wait that can trip a read timeout)."""
+        instead of one long wait that can trip a read timeout).
+
+        An EMPTY response (zero content chunks) is treated distinctly
+        from a malformed one: for a reasoning-capable model, an empty
+        response usually means it spent its whole max_tokens budget on
+        internal chain-of-thought and never reached the actual answer --
+        chain-of-thought tokens count against the same budget as the
+        answer for these models. That's a different problem than "the
+        model answered but didn't format it as JSON," so it gets a
+        distinct error message, plus one automatic retry since a
+        one-off empty response is sometimes just transient.
+        """
         llm = self._get_llm()
         messages = [
             {"role": "system", "content": system_prompt},
@@ -304,6 +315,20 @@ class PlannerAgent:
         ]
         chunks = [chunk.content for chunk in llm.stream(messages) if chunk.content]
         raw = "".join(chunks)
+
+        if not raw.strip():
+            if _retries > 0:
+                logger.warning("LLM returned an empty response; retrying (%d attempt(s) left)...", _retries)
+                return self._call_llm_json(system_prompt, user_message, _retries=_retries - 1)
+            raise PlannerAgentError(
+                "LLM returned a completely empty response after retrying. For a reasoning-capable "
+                "model, this usually means it used its whole max_tokens budget on internal "
+                "reasoning and never reached the actual answer -- chain-of-thought tokens count "
+                "against the same budget as the answer for these models. Consider a smaller/"
+                "non-reasoning model for this call, a lower reasoning-effort setting if the model "
+                "exposes one, or a higher max_tokens."
+            )
+
         cleaned = re.sub(r"^```(?:json)?|```$", "", raw.strip(), flags=re.MULTILINE).strip()
         try:
             return json.loads(cleaned)

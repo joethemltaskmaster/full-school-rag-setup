@@ -8,7 +8,6 @@ Combines a FAISS vector store (built from a school knowledge-base text
 file) with an NVIDIA-hosted LLM (via NIM / ChatNVIDIA) to answer
 natural-language questions grounded in that document set.
 
-
 Unlike data_agent.py and prediction_agent.py, this agent DOES depend on
 external services:
     - NVIDIA's hosted inference API, for answer generation
@@ -53,6 +52,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any, Iterator
 from dotenv import load_dotenv
@@ -64,6 +64,38 @@ load_dotenv(dotenv_path=r"C:\Users\Joseph\Desktop\Database\agents\.env")
 
 logger = logging.getLogger("retrieval_agent")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+
+
+def strip_markdown(text: str) -> str:
+    """
+    Mandatory post-processing, not optional cleanup: prompt instructions
+    like "never use markdown" are a request, not an enforcement mechanism.
+    Models -- especially when the retrieved context itself is heavily
+    formatted with bold text, tables, and headers -- tend to mirror that
+    structure regardless of being told not to. This strips it in code
+    every time, so a terminal (or any plain-text consumer) never has to
+    depend on the model's compliance that particular run.
+
+    Not a full markdown parser -- just removes the constructs that show
+    up as literal, unreadable clutter in a non-rendering context:
+    **bold**, *italics*, # headers, table pipes, and bullet markers.
+    """
+    # Bold / italic markers (order matters: bold before single-asterisk italic)
+    text = re.sub(r'\*\*\*(.+?)\*\*\*', r'\1', text)
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
+    text = re.sub(r'__(.+?)__', r'\1', text)
+    text = re.sub(r'(?<!\*)\*(?!\*)([^\n*]+?)(?<!\*)\*(?!\*)', r'\1', text)
+    # Headers ("# ", "## ", ... at line start)
+    text = re.sub(r'^#{1,6}\s*', '', text, flags=re.MULTILINE)
+    # Bullet markers at line start -> plain dash, keeps list structure readable
+    text = re.sub(r'^[ \t]*[\*\-\u2022]\s+', '- ', text, flags=re.MULTILINE)
+    # Markdown table pipes -> spaces (rough, but removes the visual clutter)
+    text = re.sub(r'\s*\|\s*', '  ', text)
+    # Horizontal rules
+    text = re.sub(r'^[-=]{3,}$', '', text, flags=re.MULTILINE)
+    # Collapse blank lines left behind by the above
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
 
 
 class OrchestratorAgentInterface:
@@ -92,7 +124,7 @@ class RetrievalAgent:
         nvidia_model_name: str = "nvidia/nemotron-3-ultra-550b-a55b",
         chunk_size: int = 1000,
         chunk_overlap: int = 100,
-        request_timeout: int = 120,
+        request_timeout: int = 60,
     ):
         self.knowledge_base_path = Path(knowledge_base_path)
         self.index_cache_dir = Path(index_cache_dir)
@@ -159,19 +191,19 @@ class RetrievalAgent:
         self._retriever = vectorstore.as_retriever()
 
         self._prompt = ChatPromptTemplate.from_messages([
-            ("system", "You are a helpful AI assistant for answering questions about this school. Use ONLY the provided context to answer the user's question."
-                       "Rules:"
-                       "- Answer naturally in clear conversational English."
-                       "- Do NOT copy the source document verbatim."
-                       "- Summarize the relevant information in your own words."
-                       "- Answer only the question that was asked."
-                       "- Ignore unrelated sections of the retrieved context."
-                       "- Never reproduce markdown tables, headings, bullet formatting, or document structure."
-                       "- If the context contains a table, explain its meaning in plain language instead."
-                       "- Keep answers concise unless the user explicitly asks for detail."
-                       "- If the answer cannot be found in the provided context, simply say you don't know."
-                       "Use the following context to answer the question. "
-                       "If you don't know the answer, say that you don't know.\n\n{context}"),
+            ("system", "You are a helpful AI assistant for answering questions about this school. "
+                       "Use ONLY the provided context to answer the user's question.\n"
+                       "Rules:\n"
+                       "- Answer naturally in clear conversational English.\n"
+                       "- Do NOT copy the source document verbatim.\n"
+                       "- Summarize the relevant information in your own words.\n"
+                       "- Answer only the question that was asked.\n"
+                       "- Ignore unrelated sections of the retrieved context.\n"
+                       "- Never reproduce markdown tables, headings, bullet formatting, or document structure.\n"
+                       "- If the context contains a table, explain its meaning in plain language instead.\n"
+                       "- Keep answers concise unless the user explicitly asks for detail.\n"
+                       "- If the answer cannot be found in the provided context, simply say you don't know.\n\n"
+                       "{context}"),
             ("human", "{question}"),
         ])
 
@@ -218,10 +250,14 @@ class RetrievalAgent:
         live stream. Internally still streams -- just collects the chunks
         before returning -- so it keeps the timeout benefit of streaming
         without changing the {"query", "answer", "source_snippets"}
-        contract the rest of the system already depends on."""
+        contract the rest of the system already depends on.
+
+        Runs the joined text through strip_markdown() before returning --
+        unconditionally, not just when the model happens to comply with
+        the "don't use markdown" prompt instruction."""
         self._ensure_ready()
         chunks = list(self.stream_answer(query))
-        answer_text = "".join(chunks)
+        answer_text = strip_markdown("".join(chunks))
 
         retrieved_docs = self._retriever.invoke(query)
         return {

@@ -177,3 +177,127 @@ Phase 4: Bi-Weekly Monitoring & Progress Sign-Off (Minimum 4 weeks)
 
 
 * Confidentiality Standard: All counselling records, psychological evaluations, and grievance proceedings must be kept strictly confidential in locked physical vaults and encrypted digital directories accessible only by authorized personnel.
+
+KNOWLEDGE BASE MODULE: STUDENT DROPOUT RISK CATEGORIZATION & EARLY WARNING FRAMEWORK
+
+1. EXECUTIVE SUMMARY & OPERATIONAL SCOPE
+
+This module establishes a standardized, multi-indicator Dropout Risk Categorization System designed to identify at-risk students well before academic collapse or permanent withdrawal occurs. By combining quantitative academic and attendance telemetries with qualitative socio-economic and behavioral indicators, the framework partitions students into three actionable risk tiers: Low Risk (Tier 1), Medium Risk (Tier 2), and High Risk (Tier 3).
+
+2. RISK CATEGORIZATION MATRIX & MULTI-FACTOR CRITERIA
+
+LOW RISK (Tier 1: Green)
+Composite Risk Score: 0.00 - 0.24
+Primary Indicator Criteria:
+- Attendance >= 90%
+- Academic Average >= 60%
+- Zero core subject failures
+- Timely fee settlement
+Operational Thresholds: Standard operational stability; high engagement in extracurriculars; zero major behavioral flags.
+Immediate System Action: Routine Termly Tracking & Positive Reinforcement.
+
+MEDIUM RISK (Tier 2: Yellow)
+Composite Risk Score: 0.25 - 0.55
+Primary Indicator Criteria:
+- Attendance 75% - 89%
+- Academic Average 45% - 59%
+- Failing 1-2 core subjects
+- Delayed fee payments
+Operational Thresholds: Chronic tardiness, periodic subject skipping, mild behavioral withdrawal, emerging family/economic stress.
+Immediate System Action: Tier 2 Targeted Intervention - Form Tutor audit, mandatory academic tutoring, parent-teacher alignment meeting within 5 days.
+
+HIGH RISK (Tier 3: Red)
+Composite Risk Score: 0.56 - 1.00
+Primary Indicator Criteria:
+- Attendance < 75%
+- Academic Average < 45%
+- Failing 3+ subjects
+- Severe fee arrears
+Operational Thresholds: Unexcused absences >= 10 days, severe behavioral violations, child labor/economic distress, family crisis.
+Immediate System Action: Tier 3 Emergency Intervention - Immediate principal & counsellor conference, individualized retention plan, financial relief routing.
+
+3. DEEP-DIVE RISK PROFILE BREAKDOWN
+
+3.1 Low Risk Profile (Tier 1 - Preventive Maintenance)
+
+Academic Telemetry: Student consistently achieves passing or credit-level grades across all core (Mathematics, English Language) and elective subjects. Term-over-term trajectory is stable or positive.
+
+Attendance & Punctuality: Student logs >= 90% verified attendance. Lateness is rare (< 3 instances per term) and supported by valid parental excuses.
+
+Psychosocial & Economic Indicators: Active involvement in classroom activities, sports, or clubs. School fees and resource requirements (textbooks, uniforms, lab coats) are fully settled within the first three weeks of the term.
+
+Management Protocol: Subjected to standard automated termly logging. Form Tutors provide quarterly commendations to sustain engagement.
+
+3.2 Medium Risk Profile (Tier 2 - Vulnerable / Early Warning)
+
+Academic Telemetry: Terminal score averages fluctuate between 45% and 59%, or the student fails one critical core gateway subject (e.g., Mathematics or English Language). Homework completion rate drops below 70%.
+
+Attendance & Punctuality: Attendance drops into the 75% - 89% band. Patterns exhibit "soft truancy" (e.g., missing Mondays or Fridays, late arrival after long break, or skipping specific afternoon periods).
+
+Psychosocial & Economic Indicators: Noticeable emotional withdrawal, increased peer friction, or mild behavioral infractions (e.g., dress code violations, unsubmitted assignments). Tuition payment extends beyond mid-term break, signaling household financial strain.
+
+Management Protocol:
+1. Trigger automated notification to Form Tutor and Guidance Counsellor.
+2. Conduct a Diagnostic Intake Interview to identify underlying bottlenecks (e.g., learning difficulty, transportation issues, domestic chores).
+3. Enroll student in Subject Remediation & Peer Tutoring.
+
+3.3 High Risk Profile (Tier 3 - Critical / Imminent Withdrawal)
+
+Academic Telemetry: Aggregate academic score falls below 45%, with failures in three or more subjects across two consecutive terms. The student exhibits severe learning gaps and test anxiety.
+
+Attendance & Punctuality: Attendance falls below 75% or logs 10+ cumulative unexcused absences. Unexplained disappearance for 3+ consecutive days without parental communication.
+
+Psychosocial & Economic Indicators: Severe behavioral disruption, acute emotional distress, or complete disengagement from school culture. Severe fee defaults spanning multiple terms, indications of child labor demands (e.g., trading/hawking during school hours), or major domestic disruption (e.g., loss of primary breadwinner, severe illness in family).
+
+Management Protocol:
+1. Issue immediate Tier 3 Critical Risk Alert to Vice Principal (Academics), School Counsellor, and Principal.
+2. Mandate a formal Case Conference with parents/guardians within 48 hours.
+3. Deploy a Customized Student Retention Agreement (CSRA), incorporating academic adjustments, flexible tuition payment structures, or referral to institutional welfare/scholarship funds.
+
+4. QUANTITATIVE COMPOSITE RISK SCORE (CRS) ENGINE
+
+To eliminate subjective bias, the system computes a numerical Composite Risk Score (CRS) for every student using a weighted multi-variable evaluation formula:
+
+CRS = (wA * SA) + (wP * SP) + (wF * SF) + (wB * SB)
+
+Where variables and weights (wi) are defined as follows:
+
+Attendance Deficit Index (SA) - Weight 0.35
+Score Mapping: SA = 1.0 - (Actual Attendance / Required Attendance). Values clipped to [0, 1].
+
+Academic Failure Index (SP) - Weight 0.30
+Score Mapping: Proportion of failed subjects relative to total registered subjects.
+
+Fee Settlement Deficit (SF) - Weight 0.20
+Score Mapping: 0.0 if fully paid on time; 0.5 if paid post mid-term; 1.0 if defaulting across terms.
+
+Behavioral & Life Event Flag (SB) - Weight 0.15
+Score Mapping: Cumulative score derived from logged disciplinary infractions, bereavement, or sudden trauma.
+
+Decision Boundary Mapping:
+- CRS < 0.25 -> Low Risk (Tier 1)
+- 0.25 <= CRS <= 0.55 -> Medium Risk (Tier 2)
+- CRS > 0.55 -> High Risk (Tier 3)
+
+5. ESCALATION & INTERVENTION WORKFLOW
+
+STUDENT TELEMETRY LOGGED DAILY
+(Attendance, Assessment Grades, Fee Logs, Behavioral Incidents)
+   -> COMPOSITE RISK SCORE (CRS) ENGINE
+        -> CRS < 0.25 [TIER 1, Low Risk]: Routine Termly Tracking
+        -> 0.25 <= CRS <= 0.55 [TIER 2, Medium Risk]: Form Tutor Interview; Remedial Class; Parent SMS
+        -> CRS > 0.55 [TIER 3, High Risk]: Mandatory Parent-Principal Conference (48 hrs); Custom Retention Agreement; Welfare/Fee Relief Route
+
+6. DE-ESCALATION & EXIT STANDARDS
+
+A student assigned to Tier 2 or Tier 3 cannot be reclassified to a lower risk tier until they meet the following exit criteria across a minimum monitoring period:
+
+Medium to Low Risk Transition:
+- Attendance sustained at >= 85% for 6 consecutive weeks.
+- Passing grades achieved in all failed core subjects during mid-term or end-of-term evaluations.
+- Zero unexcused tardiness or disciplinary infractions over the monitoring window.
+
+High to Medium Risk Transition:
+- Attendance restored to >= 75% with no unexcused absences for 4 consecutive weeks.
+- Re-engagement in learning confirmed by Form Tutor and Guidance Counsellor via signed weekly progress reports.
+- Active execution of a binding fee workout plan or scholarship support arrangement.
