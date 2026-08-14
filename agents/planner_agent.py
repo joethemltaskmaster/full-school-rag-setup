@@ -201,6 +201,62 @@ def _clean(params: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in params.items() if v is not None}
 
 
+# Matches the synthetic reference-dataset ID format used by
+# student_risk_records (e.g. "STU-00001", "stu1", "STU 42"). Real
+# operational students use plain integer IDs instead. This is checked
+# with regex IN CODE rather than asking the LLM to split "student_id"
+# into two separate JSON fields -- that classification step was a real,
+# demonstrated source of errors: the LLM would sometimes strip the
+# "STU-" prefix and leading zeros itself, silently turning "STU-00001"
+# into student_id=1 and looking up a completely different, real student
+# instead of the intended synthetic reference record.
+REFERENCE_STUDENT_ID_PATTERN = re.compile(r"^\s*stu[\s\-_]?0*(\d+)\s*$", re.IGNORECASE)
+
+# Reference IDs in student_risk_records are zero-padded to 5 digits
+# (STU-00001, STU-00002, ...). Adjust this if your dataset uses a
+# different width -- it only affects how a loosely-written id like
+# "stu1" or "STU-1" gets normalized before the DB lookup.
+REFERENCE_STUDENT_ID_WIDTH = 5
+
+
+def classify_student_id(raw_value: Any) -> tuple[int | None, str | None]:
+    """
+    Takes whatever the LLM put in the single "student_id" entity slot --
+    could be an int, a float, a numeric string, or a STU-xxxxx reference
+    string, written in almost any casing/spacing -- and deterministically
+    splits it into (real_student_id, reference_student_id). Exactly one
+    of the two is non-None on a recognized value; both are None if
+    raw_value is missing or doesn't match either shape (in which case
+    the existing "missing required field" clarification step downstream
+    asks the user to clarify, rather than this function guessing).
+    """
+    if raw_value is None:
+        return None, None
+
+    if isinstance(raw_value, bool):  # bool is an int subclass in Python -- exclude explicitly
+        return None, None
+
+    if isinstance(raw_value, int):
+        return raw_value, None
+
+    if isinstance(raw_value, float) and raw_value.is_integer():
+        return int(raw_value), None
+
+    if isinstance(raw_value, str):
+        text = raw_value.strip()
+        if not text:
+            return None, None
+
+        ref_match = REFERENCE_STUDENT_ID_PATTERN.match(text)
+        if ref_match:
+            return None, f"STU-{int(ref_match.group(1)):0{REFERENCE_STUDENT_ID_WIDTH}d}"
+
+        if text.lstrip("-").isdigit():
+            return int(text), None
+
+    return None, None
+
+
 # Params that MUST be present (non-None) for a given data intent to
 # succeed. Checked BEFORE calling the orchestrator, so a missing required
 # value produces one clear, actionable message ("I couldn't find a
@@ -370,10 +426,10 @@ class PlannerAgent:
             "mentioned or implied. Respond with ONLY a JSON object, no markdown fences, no "
             "commentary, using this schema (every key optional):\n"
             "{\n"
-            '  "student_id": <int, a REAL enrolled student\'s numeric ID, e.g. 1, 12, 214>,\n'
-            '  "reference_student_id": <string, ONLY if the message literally contains an ID '
-            'in the STU-xxxxx format, e.g. "STU-00001" -- this is a DIFFERENT id space from '
-            'student_id and must not be converted to a number>,\n'
+            '  "student_id": <the student identifier EXACTLY as written in the message -- '
+            'a plain number like 1, 12, 214 for a real enrolled student, OR a reference-'
+            'dataset id like "STU-00001" -- copy it as-is, do NOT convert, reformat, strip '
+            'prefixes, or drop leading zeros yourself; code elsewhere handles that>,\n'
             '  "student_name": <string>,\n'
             '  "class_id": <int>,\n'
             '  "teacher_id": <int>,\n'
@@ -414,6 +470,16 @@ class PlannerAgent:
         config = INTENT_CATEGORIES.get(intent, INTENT_CATEGORIES["unknown"])
         steps: list[ExecutionStep] = []
 
+        # Regex classification happens here, once, in code -- not by asking
+        # the LLM to pick the right JSON field. Every branch below still
+        # reads entities.get("student_id") / entities.get("reference_student_id")
+        # exactly as before; this just makes sure those two keys hold
+        # correctly-typed values regardless of how the raw id was written.
+        entities = dict(entities)
+        real_id, reference_id = classify_student_id(entities.get("student_id"))
+        entities["student_id"] = real_id
+        entities["reference_student_id"] = reference_id
+
         student_id = entities.get("student_id")
         class_id = entities.get("class_id")
 
@@ -421,10 +487,18 @@ class PlannerAgent:
             data_intent, params = self._resolve_data_call(intent, entities)
             missing = [f for f in REQUIRED_DATA_PARAMS.get(data_intent, []) if params.get(f) is None]
             if missing:
+                if missing == ["student_id"] and reference_id:
+                    note = (
+                        f"'{reference_id}' looks like a synthetic reference-dataset id, not a real "
+                        f"enrolled student. '{data_intent}' needs a real student's numeric id -- try "
+                        f"asking for a risk prediction on {reference_id} instead, or give a real "
+                        f"student's number for a profile/record lookup."
+                    )
+                else:
+                    note = f"Required for '{data_intent}' but not found in the message: {', '.join(missing)}"
                 steps.append(ExecutionStep(
                     step=1, agent="clarification", action=data_intent,
-                    params={"missing_fields": missing},
-                    note=f"Required for '{data_intent}' but not found in the message: {', '.join(missing)}",
+                    params={"missing_fields": missing}, note=note,
                 ))
             else:
                 steps.append(ExecutionStep(step=1, agent="data", action=data_intent, params=params))
@@ -632,11 +706,11 @@ class PlannerAgent:
 
             elif step.agent == "clarification":
                 missing = step.params.get("missing_fields", [])
-                result = {
-                    "status": "error", "agent": "planner_agent",
-                    "error": f"I couldn't find {', '.join(missing)} in your message for '{step.action}' -- "
-                             f"could you specify it and try again?",
-                }
+                error_message = step.note or (
+                    f"I couldn't find {', '.join(missing)} in your message for '{step.action}' -- "
+                    f"could you specify it and try again?"
+                )
+                result = {"status": "error", "agent": "planner_agent", "error": error_message}
 
             else:
                 result = {"status": "error", "agent": "planner_agent", "error": f"Unroutable step: {step}"}
