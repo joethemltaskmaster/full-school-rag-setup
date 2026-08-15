@@ -19,7 +19,7 @@ prompts:
 
 Matches the same OrchestratorAgentInterface/handle(task) convention as
 the other agents, so the orchestrator can call it the same way:
-
+folder
     handler = NarrationAgentHandler()
     handler.handle({"prediction": prediction_dict})
     # -> {"status": "success"/"error", "agent": "narration_agent", "result": {"narrative": "..."}}
@@ -31,6 +31,7 @@ Environment:
     NVIDIA_API_KEY must be set.
     Required package: langchain-nvidia-ai-endpoints
 """
+
 
 from __future__ import annotations
 
