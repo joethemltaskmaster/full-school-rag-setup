@@ -1,0 +1,27 @@
+payment_id,student_id,term,amount_due,amount_paid,cumulative_paid,balance_remaining,payment_date,payment_method,status
+1,1,First Term,"500,000","185,000","185,000","315,000",2025-10-31,cash,partial
+2,1,First Term,"500,000","315,000","500,000",0,2025-12-02,cash,paid
+3,2,First Term,"500,000","135,000","135,000","365,000",2025-09-24,bank transfer,partial
+4,2,First Term,"500,000","15,000","150,000","350,000",2025-10-30,bank transfer,partial
+5,2,First Term,"500,000","350,000","500,000",0,2025-11-09,card,paid
+6,3,First Term,"500,000","95,000","95,000","405,000",2025-10-19,card,partial
+7,3,First Term,"500,000","70,000","165,000","335,000",2025-11-18,bank transfer,partial
+8,3,First Term,"500,000","335,000","500,000",0,2025-12-03,card,paid
+9,4,First Term,"500,000","350,000","350,000","150,000",2025-09-29,card,partial
+10,4,First Term,"500,000","50,000","400,000","100,000",2025-10-20,bank transfer,partial
+11,4,First Term,"500,000","10,000","410,000","90,000",2025-12-04,bank transfer,partial
+12,4,First Term,"500,000","90,000","500,000",0,2025-12-08,pos,paid
+13,5,First Term,"500,000","250,000","250,000","250,000",2025-09-18,bank transfer,partial
+14,6,First Term,"500,000","345,000","345,000","155,000",2025-10-21,bank transfer,partial
+15,6,First Term,"500,000","155,000","500,000",0,2025-12-02,bank transfer,paid
+16,7,First Term,"500,000","105,000","105,000","395,000",2025-10-20,bank transfer,partial
+17,7,First Term,"500,000","395,000","500,000",0,2025-11-13,pos,paid
+18,8,First Term,"500,000","95,000","95,000","405,000",2025-09-18,card,partial
+19,8,First Term,"500,000","165,000","260,000","240,000",2025-11-02,card,partial
+20,8,First Term,"500,000","190,000","450,000","50,000",2025-11-19,card,partial
+21,9,First Term,"500,000","105,000","105,000","395,000",2025-10-19,card,partial
+22,9,First Term,"500,000","345,000","450,000","50,000",2025-11-30,card,partial
+23,10,First Term,"500,000","95,000","95,000","405,000",2025-10-15,bank transfer,partial
+24,10,First Term,"500,000","140,000","235,000","265,000",2025-11-01,bank transfer,partial
+25,10,First Term,"500,000","25,000","260,000","240,000",2025-11-04,cash,partial
+26,10,First Term,"500,000","240,000","500,000",0,2025-11-20,bank transfer,paid
