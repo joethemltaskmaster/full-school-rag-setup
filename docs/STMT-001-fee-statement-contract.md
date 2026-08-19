@@ -11,7 +11,7 @@
 
 This contract is written against the actual operational schema, not an idealized one:
 
-- `fee_payments` is the only operational fee table. Its columns are: `payment_id`, `student_id`, `term`, `amount_due`, `amount_paid`, `payment_date` (TEXT, no format constraint at the database level), `payment_method`, `status`.
+- `fees_payment` is the only operational fee table. Its columns are: `payment_id`, `student_id`, `term`, `amount_due`, `amount_paid`, `payment_date` (TEXT, no format constraint at the database level), `payment_method`, `status`.
 - The CSV that feeds this table uses ISO dates (`YYYY-MM-DD`, e.g. `2025-09-15`).
 - `payment_date` has no validation anywhere upstream — nothing stops a differently formatted or malformed string from entering the table. This contract exists specifically to decide what happens when that occurs.
 - `amount_paid` is stored as a REAL (float). Floating-point money is a known trap (e.g. `0.1 + 0.2 ≠ 0.3` in floating-point arithmetic), so the reconciliation definition below states the exact rounding and comparison rule rather than leaving it implicit.
@@ -40,15 +40,15 @@ Out of scope for this contract: statement versioning, idempotent regeneration, a
 
 Each statement line represents exactly one payment. The fields, in order:
 
-| Field | Mandatory? | Source | Notes |
-|---|---|---|---|
-| `payment_id` | **Yes** | `fee_payments.payment_id` | The traceability key. Every line traces to exactly one payment by this id, and a given `payment_id` appears **at most once** on a statement. |
-| `amount_paid` | **Yes** | `fee_payments.amount_paid` | The monetary amount. Rendered at 2 decimal places (see Section 4 for the rounding rule). |
-| `payment_date` | No | `fee_payments.payment_date` | Included for readability; already validated as strict ISO by definition, since unplaceable payments never reach the line-generation step. |
-| `payment_method` | No | `fee_payments.payment_method` | Passed through as-is. |
-| `status` | No | `fee_payments.status` | Passed through as-is. |
+| Field | Mandatory? | Source                        | Notes |
+|---|---|-------------------------------|---|
+| `payment_id` | **Yes** | `fees_payment.payment_id`     | The traceability key. Every line traces to exactly one payment by this id, and a given `payment_id` appears **at most once** on a statement. |
+| `amount_paid` | **Yes** | `fees_payment.amount_paid`    | The monetary amount. Rendered at 2 decimal places (see Section 4 for the rounding rule). |
+| `payment_date` | No | `fees_payment.payment_date`   | Included for readability; already validated as strict ISO by definition, since unplaceable payments never reach the line-generation step. |
+| `payment_method` | No | `fees_payment.payment_method` | Passed through as-is. |
+| `status` | No | `fees_payment.status`         | Passed through as-is. |
 
-No other fields are added. This is deliberately minimal — a line is auditable back to a single row in `fee_payments` and nothing more.
+No other fields are added. This is deliberately minimal — a line is auditable back to a single row in `fees_payment` and nothing more.
 
 ## 4. Reconciliation Definition
 
@@ -60,11 +60,11 @@ A statement is **reconciled** for a given period if and only if it reaches **gen
 
   The distinction that matters here: an unplaceable date or an identical duplicate is not an open question — Sections 1–2 and the duplicate rule below already state exactly what happens to it (excluded-and-flagged, or deduped-and-flagged), so a run containing only those anomalies has nothing left for a human to decide and can be `RECONCILED`. A conflicting duplicate is different — this contract explicitly refuses to pick a winner, so the ambiguity is still open, and that is what forces `BLOCKED` until a person resolves it in the source ledger.
 
-1. **Set equality:** the set of `payment_id` values on the statement equals the set of `payment_id` values in the ledger (`fee_payments`) that fall inside the period per Sections 1–2, and each id appears **exactly once** on both sides.
+1. **Set equality:** the set of `payment_id` values on the statement equals the set of `payment_id` values in the ledger (`fees_payment`) that fall inside the period per Sections 1–2, and each id appears **exactly once** on both sides.
 
-   **Duplicate `payment_id` rule.** `fee_payments` has no `updated_at`, no version column, and no other field that reliably indicates which of two rows sharing a `payment_id` is authoritative — so no field-based "winner" can be chosen without guessing. Comparison for this rule is over **the entire ledger row**, not just the fields that appear on a printed statement line — `student_id`, `term`, and `amount_due` must match too, not only `amount_paid`, `payment_date`, `payment_method`, and `status`. A row can render identically on a statement line while differing in a column the line doesn't show (e.g. `term`), and that is still a conflict, not a duplicate. The rule is therefore:
-   - If two or more rows share a `payment_id` and are **identical across every column of `fee_payments`** (`student_id`, `term`, `amount_due`, `amount_paid`, `payment_date`, `payment_method`, `status`), they are treated as one payment: deduplicated to a single line, and the duplication is flagged in the generation output as a ledger anomaly. This case alone does not force `BLOCKED`.
-   - If two or more rows share a `payment_id` and **disagree on any column of `fee_payments`** — whether or not that column is shown on the statement line — no row is selected as the winner. The `payment_id` is **excluded from the statement's counted lines** (on the same footing as an unplaceable date, Section 2), is surfaced in the output as a **conflicting duplicate** listing every disagreeing row verbatim across all columns, and forces the run's generation status to `BLOCKED`. It must be resolved in the source ledger and the statement regenerated before the period can reach `RECONCILED`.
+   **Duplicate `payment_id` rule.** `fees_payment` has no `updated_at`, no version column, and no other field that reliably indicates which of two rows sharing a `payment_id` is authoritative — so no field-based "winner" can be chosen without guessing. Comparison for this rule is over **the entire ledger row**, not just the fields that appear on a printed statement line — `student_id`, `term`, and `amount_due` must match too, not only `amount_paid`, `payment_date`, `payment_method`, and `status`. A row can render identically on a statement line while differing in a column the line doesn't show (e.g. `term`), and that is still a conflict, not a duplicate. The rule is therefore:
+   - If two or more rows share a `payment_id` and are **identical across every column of `fees_payment`** (`student_id`, `term`, `amount_due`, `amount_paid`, `payment_date`, `payment_method`, `status`), they are treated as one payment: deduplicated to a single line, and the duplication is flagged in the generation output as a ledger anomaly. This case alone does not force `BLOCKED`.
+   - If two or more rows share a `payment_id` and **disagree on any column of `fees_payment`** — whether or not that column is shown on the statement line — no row is selected as the winner. The `payment_id` is **excluded from the statement's counted lines** (on the same footing as an unplaceable date, Section 2), is surfaced in the output as a **conflicting duplicate** listing every disagreeing row verbatim across all columns, and forces the run's generation status to `BLOCKED`. It must be resolved in the source ledger and the statement regenerated before the period can reach `RECONCILED`.
    - This is a deliberate no-guess rule: silently picking "the higher amount" or "the later row by insertion order" would let a data-entry error quietly determine a family's fee record. Exclusion-and-flag forces a human to resolve it instead.
 
 2. **Total correctness:** the printed statement total equals the sum of the printed line amounts — not a separately computed database sum. This ties the "total" a reader sees directly to the lines they can audit. On a `BLOCKED` run, this total is a **subtotal of includable lines only** and must be labeled as such, never as "the total."
@@ -119,7 +119,7 @@ Both dates are strict ISO and fall inside `[2025-09-01, 2025-12-31]`.
 
 **Processing:**
 
-- `payment_id 30` (date `2025-12-31`, on the boundary): **included**, per Section 1 the end date is inclusive. It appears twice in the raw export as **identical rows across every `fee_payments` column**, not just the rendered ones — `student_id`, `term`, and `amount_due` match too, in addition to `amount_paid`, `payment_date`, `payment_method`, and `status`. Per Section 4's duplicate rule this is the non-conflicting case, so it is deduplicated to one line and the duplicate is flagged as a ledger anomaly rather than treated as a conflict.
+- `payment_id 30` (date `2025-12-31`, on the boundary): **included**, per Section 1 the end date is inclusive. It appears twice in the raw export as **identical rows across every `fees_payment` column**, not just the rendered ones — `student_id`, `term`, and `amount_due` match too, in addition to `amount_paid`, `payment_date`, `payment_method`, and `status`. Per Section 4's duplicate rule this is the non-conflicting case, so it is deduplicated to one line and the duplicate is flagged as a ledger anomaly rather than treated as a conflict.
 - `payment_id 31` (date `12/31/2025`): **excluded** from the statement, per Section 2 — non-ISO format is not parsed. It is surfaced in the "unplaceable payments" output as unplaceable, not silently dropped.
 
 **Resulting statement:**
@@ -140,7 +140,7 @@ Both dates are strict ISO and fall inside `[2025-09-01, 2025-12-31]`.
 
 **Period:** First Term, `2025-09-01` to `2025-12-31` (inclusive).
 
-**Ledger rows (full `fee_payments` columns, not just the ones a statement line renders):**
+**Ledger rows (full `fees_payment` columns, not just the ones a statement line renders):**
 
 | payment_id | student_id | term | amount_due | payment_date | amount_paid | payment_method | status | Note |
 |---|---|---|---|---|---|---|---|---|
