@@ -413,7 +413,7 @@ class SchoolDB:
     # =================================================================
     def get_fee_history(self, student_id: int) -> list[dict]:
         return self._fetchall(
-            "SELECT * FROM fee_payments WHERE student_id = ? ORDER BY term",
+            "SELECT * FROM fees_payment WHERE student_id = ? ORDER BY term",
             (student_id,),
         )
 
@@ -421,7 +421,7 @@ class SchoolDB:
         row = self._fetchone(
             """SELECT COALESCE(SUM(amount_due), 0) AS total_due,
                       COALESCE(SUM(amount_paid), 0) AS total_paid
-               FROM fee_payments WHERE student_id = ?""",
+               FROM fees_payment WHERE student_id = ?""",
             (student_id,),
         )
         row["balance"] = round(row["total_due"] - row["total_paid"], 2)
@@ -434,7 +434,7 @@ class SchoolDB:
                    SUM(fp.amount_due) AS total_due,
                    SUM(fp.amount_paid) AS total_paid,
                    SUM(fp.amount_due) - SUM(fp.amount_paid) AS balance
-            FROM fee_payments fp
+            FROM fees_payment fp
             JOIN students st ON fp.student_id = st.student_id
             LEFT JOIN classes c ON st.class_id = c.class_id
         """
@@ -446,13 +446,13 @@ class SchoolDB:
         return self._fetchall(sql, tuple(params))
 
     def record_payment(self, student_id: int, term: str, amount_due: float,
-                        amount_paid: float, payment_date: str = None,
-                        payment_method: str = None) -> int:
+                       amount_paid: float, payment_date: str = None,
+                       payment_method: str = None) -> int:
         status = "paid" if amount_paid >= amount_due else (
             "partial" if amount_paid > 0 else "pending"
         )
         return self._execute(
-            """INSERT INTO fee_payments
+            """INSERT INTO fees_payment
                (student_id, term, amount_due, amount_paid, payment_date, payment_method, status)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (student_id, term, amount_due, amount_paid, payment_date, payment_method, status),
