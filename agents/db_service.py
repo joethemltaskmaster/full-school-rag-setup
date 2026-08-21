@@ -445,6 +445,46 @@ class SchoolDB:
         sql += " GROUP BY st.student_id HAVING balance > 0 ORDER BY balance DESC"
         return self._fetchall(sql, tuple(params))
 
+    def get_fees_payment_in_range(self, student_id: int, start: str, end: str) -> list[dict]:
+        """
+        Raw fees_payment rows for one student relevant to generating a fee
+        statement for the inclusive period [start, end] (STMT-001).
+
+        Returns two kinds of rows, both needed by the statement generator
+        (agents/fee_statement.py) to satisfy the contract's "a payment is
+        never silently dropped" rule:
+
+          1. Rows whose payment_date is a strict ISO string ('YYYY-MM-DD')
+             falling within [start, end] -- a plain string BETWEEN is safe
+             here because zero-padded ISO dates sort identically to
+             chronological order.
+          2. ANY row whose payment_date does NOT look like a strict ISO
+             date (NULL, empty, or any other shape) -- these can never be
+             safely judged in-range or out-of-range by a date comparison,
+             so they're always returned regardless of [start, end] and
+             left for the statement generator to classify as unplaceable
+             and surface explicitly, instead of a malformed date silently
+             vanishing from a range-filtered query.
+
+        This method only fetches and orders rows -- all date-format
+        validation, period-membership decisions, duplicate detection,
+        and money rounding stay out of this layer and belong to
+        agents/fee_statement.py.
+        """
+        return self._fetchall(
+            """
+            SELECT * FROM fees_payment
+            WHERE student_id = ?
+              AND (
+                    (payment_date BETWEEN ? AND ?)
+                    OR payment_date IS NULL
+                    OR payment_date NOT GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
+                  )
+            ORDER BY payment_date, payment_id
+            """,
+            (student_id, start, end),
+        )
+
     def record_payment(self, student_id: int, term: str, amount_due: float,
                         amount_paid: float, payment_date: str = None,
                         payment_method: str = None) -> int:
