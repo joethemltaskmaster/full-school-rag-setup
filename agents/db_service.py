@@ -445,6 +445,48 @@ class SchoolDB:
         sql += " GROUP BY st.student_id HAVING balance > 0 ORDER BY balance DESC"
         return self._fetchall(sql, tuple(params))
 
+    def get_fees_payment_in_range(self, student_id: int, start: str, end: str) -> list[dict]:
+        """
+        Raw fees_payment rows for one student, for the statement generator
+        (agents/fee_statement.py) to turn into a statement for the
+        inclusive period [start, end] (STMT-001).
+
+        NOTE: this used to try to pre-filter by date in SQL (an OR-branch
+        combining `payment_date BETWEEN ? AND ?` with a GLOB check for
+        "does this even look like an ISO date"). That was wrong: GLOB
+        only checks the *shape* of the string (4 digits, dash, 2 digits,
+        dash, 2 digits) -- it has no concept of a calendar, so a fake
+        date like '2025-02-30' passes the shape check and is treated as
+        a normal ISO date. It then has to clear the BETWEEN check too,
+        and a fake date sorts wherever its digits put it lexicographically
+        -- which is frequently outside whatever range is being queried.
+        A row can therefore fail *both* OR-branches and vanish from the
+        result set entirely, before fee_statement.py's real calendar
+        validation (which would have caught it and reported it as
+        unplaceable) ever sees the row. That's a silent drop of a real
+        payment, which STMT-001 explicitly forbids.
+
+        There is no safe way to distinguish "really in range", "really
+        out of range", and "not a real date at all" using string
+        comparisons/GLOB alone. So this method no longer tries: it hands
+        back every row for the student, unfiltered by date, and lets
+        agents/fee_statement.py -- which actually parses dates with a
+        real calendar (e.g. datetime.strptime) -- decide range membership
+        and flag anything unparsable/invalid as unplaceable instead of
+        dropping it.
+
+        This method only fetches and orders rows -- all date-format
+        validation, period-membership decisions, duplicate detection,
+        and money rounding stay out of this layer and belong to
+        agents/fee_statement.py. `start` and `end` are accepted (and kept
+        in the signature) so callers don't need to change, but they are
+        no longer used to filter here.
+        """
+        return self._fetchall(
+            "SELECT * FROM fees_payment WHERE student_id = ? ORDER BY payment_id",
+            (student_id,),
+        )
+
     def record_payment(self, student_id: int, term: str, amount_due: float,
                         amount_paid: float, payment_date: str = None,
                         payment_method: str = None) -> int:
