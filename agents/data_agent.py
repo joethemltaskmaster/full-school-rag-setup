@@ -24,6 +24,7 @@ Usage:
 from typing import Any, Callable
 
 from db_service import SchoolDB, RecordNotFoundError
+from fee_statement import generate_fee_statement
 
 
 class UnknownIntentError(Exception):
@@ -73,6 +74,11 @@ class SchoolAgent:
             "get_student_timetable": self._get_student_timetable,
             "get_student_full_profile": self._get_student_full_profile,
             "get_class_overview": self._get_class_overview,
+
+            # ---- STMT-001 reconcilable fee statement ----
+            # Not in _write_intents: it never mutates school.db, it only
+            # reads the ledger and writes an output file under statements/.
+            "generate_fee_statement": self._generate_fee_statement,
 
             # ---- ML reference/demo tables (student_risk_records, fee_default_records) ----
             # These are the SYNTHETIC training datasets the models were built on
@@ -260,6 +266,19 @@ class SchoolAgent:
     def _get_class_overview(self, class_id: int):
         with SchoolDB(self.db_path) as db:
             return db.get_class_overview(class_id)
+
+    def _generate_fee_statement(self, student_id: int, start: str, end: str):
+        """Generates a STMT-001 fee statement file for one student over
+        [start, end] (inclusive). generate_fee_statement() returns its
+        own {"ok"/"error"} shape rather than raising for contract-defined
+        outcomes (BLOCKED, empty statement) -- only a genuinely invalid
+        request (e.g. start after end) comes back as ok=False, which is
+        re-raised here so it flows through handle()'s normal exception
+        handling into the standard {"ok": False, "error": ...} response."""
+        result = generate_fee_statement(student_id, start, end, db_path=self.db_path)
+        if not result.get("ok"):
+            raise ValueError(result.get("error", "Failed to generate fee statement."))
+        return result
 
     # ---- ML reference/demo table wrappers ----
     def _get_student_risk_record(self, student_id: str):
