@@ -20,6 +20,7 @@ Acceptance criteria -> test map:
     4. No payments                -> test_no_payments
     5. Invalid range               -> test_invalid_range_no_file
     (contract edge cases)          -> test_malformed_date_is_unplaceable,
+                                       test_fake_calendar_date_is_unplaceable,
                                        test_identical_duplicates_reconciled,
                                        test_conflicting_duplicates_blocks
 """
@@ -193,6 +194,40 @@ def test_malformed_date_is_unplaceable(db_path, statements_dir):
     assert "Unplaceable payments" in content
     assert "payment_id=302" in content  # but surfaced, not silently dropped
     assert "09/15/2025" in content
+
+
+# =========================================================================
+# Test 5b -- Fake calendar date (right shape, not a real date)
+# =========================================================================
+def test_fake_calendar_date_is_unplaceable(db_path, statements_dir):
+    # '2025-02-30' has the exact YYYY-MM-DD shape a naive SQL GLOB check
+    # would accept -- but February never has 30 days, so no real calendar
+    # can place it. This used to slip past the DB layer's old date filter
+    # entirely (it matched the ISO-shape GLOB, so it wasn't routed to the
+    # "malformed" branch, but it also failed a lexicographic BETWEEN
+    # against a real range, so it matched neither OR-branch and was
+    # silently dropped before fee_statement.py ever saw the row). Now
+    # get_fees_payment_in_range() returns every row unfiltered, so this
+    # payment must reach the statement generator and be caught there.
+    _insert(db_path, [
+        (701, STUDENT_ID, "Term1", 10000.0, 10000.0, "2025-09-15", "cash", "paid"),
+        (702, STUDENT_ID, "Term1", 5000.0, 5000.0, "2025-02-30", "cash", "paid"),  # fake date
+    ])
+
+    result = generate_fee_statement(STUDENT_ID, "2025-09-01", "2025-09-30",
+                                     db_path=db_path, output_dir=statements_dir)
+
+    assert result["ok"] is True
+    assert result["line_count"] == 1
+    assert result["unplaceable_count"] == 1
+    assert result["total"] == "10000.00"  # fake-date row excluded from total
+
+    content = Path(result["file_path"]).read_text()
+    assert "payment_id=701" in content
+    assert "payment_id=702" not in content.split("Unplaceable")[0]  # not in the lines section
+    assert "Unplaceable payments" in content
+    assert "payment_id=702" in content  # surfaced, not silently dropped
+    assert "2025-02-30" in content
 
 
 # =========================================================================
