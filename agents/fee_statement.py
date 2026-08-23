@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any
 
 from db_service import SchoolDB
+import statement_store
 
 # agents/fee_statement.py -> repo root is one level up from agents/
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -307,21 +308,85 @@ def generate_fee_statement(
         conflicting=conflicting,
     )
 
+    # =====================================================================
+    # STMT-003 -- statement versioning, inserted AFTER statement content
+    # is completely generated so it never influences generation itself.
+    #
+    # Only rows that could possibly influence the printed statement are
+    # fingerprinted: placeable rows (in-period, drive lines/total) plus
+    # unplaceable rows (can't be date-ruled-out of the period, and are
+    # themselves rendered into the statement). Rows with a *valid* ISO
+    # date outside [start, end] are correctly excluded above and never
+    # reach this point, so unrelated ledger activity outside the
+    # requested period can never change the fingerprint or version.
+    # =====================================================================
+    relevant_rows = placeable_rows + unplaceable_rows
+    fingerprint = statement_store.compute_fingerprint(student_id, start, end, relevant_rows)
+
+    content_text = result.render_text()
+    latest = statement_store.get_latest_version(db_path, student_id, start, end)
+    if latest is not None and latest["fingerprint"] == fingerprint:
+        # Relevant ledger state is unchanged -- reuse the existing
+        # version and its exact stored content, so the returned/written
+        # statement is byte-for-byte identical to the original.
+        version = latest["version"]
+        content_text = latest["statement_content"]
+    else:
+        version = statement_store.create_version(
+            db_path, student_id, start, end, fingerprint, content_text
+        )
+
     target_dir = Path(output_dir) if output_dir is not None else DEFAULT_STATEMENTS_DIR
     target_dir.mkdir(parents=True, exist_ok=True)
     file_path = target_dir / _file_name(student_id, start, end)
-    file_path.write_text(result.render_text(), encoding="utf-8")
+    file_path.write_text(content_text, encoding="utf-8")
     result.file_path = str(file_path)
 
     return {
         "ok": True,
         "file_path": str(file_path),
         "status": generation_status,
+        "version": version,
         "total": str(total),
         "line_count": len(lines),
         "unplaceable_count": len(unplaceable_rows),
         "identical_duplicate_ids": identical_duplicate_ids,
         "conflicting_ids": list(conflicting.keys()),
+    }
+
+
+def get_statement_version(
+    student_id: Any,
+    start: str,
+    end: str,
+    version: int,
+    db_path: str = "school.db",
+) -> dict[str, Any]:
+    """
+    Retrieve a previously stored, immutable statement version for
+    student_id + [start, end].
+
+    Returns:
+        {"ok": True, "version": ..., "content": ..., "fingerprint": ...,
+         "generated_at": ...}
+    if that version was ever issued, or:
+        {"ok": False, "error": "Version {version} has not been issued
+         for this statement."}
+    if it was not -- following the same {"ok": bool, ...} contract
+    generate_fee_statement() already uses for caller-facing outcomes.
+    """
+    stored = statement_store.get_version(db_path, student_id, start, end, version)
+    if stored is None:
+        return {
+            "ok": False,
+            "error": f"Version {version} has not been issued for this statement.",
+        }
+    return {
+        "ok": True,
+        "version": stored["version"],
+        "content": stored["statement_content"],
+        "fingerprint": stored["fingerprint"],
+        "generated_at": stored["generated_at"],
     }
 
 

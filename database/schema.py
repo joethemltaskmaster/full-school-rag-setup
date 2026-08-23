@@ -166,6 +166,26 @@ def create_tables(conn: sqlite3.Connection) -> None:
     """)
 
     # ---------------------------------------------------------------
+    # STATEMENT_VERSIONS  (STMT-003 -- immutable history of generated
+    # fee statements per student + requested period)
+    # ---------------------------------------------------------------
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS statement_versions (
+        version_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        student_id           INTEGER NOT NULL,
+        period_start         TEXT NOT NULL,      -- 'YYYY-MM-DD'
+        period_end           TEXT NOT NULL,      -- 'YYYY-MM-DD'
+        version              INTEGER NOT NULL,
+        fingerprint          TEXT NOT NULL,       -- sha256 of relevant ledger state
+        statement_content    TEXT NOT NULL,       -- full rendered statement text
+        generated_at         TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY (student_id) REFERENCES students (student_id)
+            ON DELETE CASCADE,
+        UNIQUE (student_id, period_start, period_end, version)
+    );
+    """)
+
+    # ---------------------------------------------------------------
     # GUARDIAN_MESSAGES  (school -> guardian communication log)
     # ---------------------------------------------------------------
     cur.execute("""

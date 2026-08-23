@@ -37,7 +37,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from fee_statement import generate_fee_statement  # noqa: E402
+from fee_statement import generate_fee_statement, get_statement_version  # noqa: E402
 
 
 # Real operational student_ids are plain integers (see db_service.py /
@@ -291,3 +291,107 @@ def test_rounding_uses_decimal_half_up_not_float_round(db_path, statements_dir):
     assert result["ok"] is True
     assert result["total"] == "10.01"
     assert Decimal(result["total"]) == Decimal("10.01")
+
+
+# =========================================================================
+# STMT-003 -- statement versioning acceptance tests
+# =========================================================================
+
+def test_stmt003_first_statement_is_version_1(db_path, statements_dir):
+    _insert(db_path, [
+        (901, STUDENT_ID, "Term1", 10000.0, 10000.0, "2026-01-10", "cash", "paid"),
+    ])
+
+    result = generate_fee_statement(STUDENT_ID, "2026-01-01", "2026-01-31",
+                                     db_path=db_path, output_dir=statements_dir)
+
+    assert result["ok"] is True
+    assert result["version"] == 1
+
+
+def test_stmt003_identical_request_returns_same_version_and_byte_identical_content(
+    db_path, statements_dir
+):
+    _insert(db_path, [
+        (902, STUDENT_ID, "Term1", 10000.0, 10000.0, "2026-01-10", "cash", "paid"),
+    ])
+
+    first = generate_fee_statement(STUDENT_ID, "2026-01-01", "2026-01-31",
+                                    db_path=db_path, output_dir=statements_dir)
+    second = generate_fee_statement(STUDENT_ID, "2026-01-01", "2026-01-31",
+                                     db_path=db_path, output_dir=statements_dir)
+
+    assert first["version"] == 1
+    assert second["version"] == 1
+
+    first_content = Path(first["file_path"]).read_text()
+    second_content = Path(second["file_path"]).read_text()
+    assert first_content == second_content
+
+
+def test_stmt003_change_outside_period_does_not_bump_version(db_path, statements_dir):
+    _insert(db_path, [
+        (903, STUDENT_ID, "Term1", 10000.0, 10000.0, "2026-01-10", "cash", "paid"),
+    ])
+
+    generate_fee_statement(STUDENT_ID, "2026-01-01", "2026-01-31",
+                            db_path=db_path, output_dir=statements_dir)
+
+    # A February transaction -- outside the requested January period --
+    # must not affect the January statement's version.
+    _insert(db_path, [
+        (904, STUDENT_ID, "Term1", 5000.0, 5000.0, "2026-02-05", "cash", "paid"),
+    ])
+
+    result = generate_fee_statement(STUDENT_ID, "2026-01-01", "2026-01-31",
+                                     db_path=db_path, output_dir=statements_dir)
+
+    assert result["version"] == 1
+
+
+def test_stmt003_change_inside_period_bumps_version_and_preserves_v1(
+    db_path, statements_dir
+):
+    _insert(db_path, [
+        (905, STUDENT_ID, "Term1", 10000.0, 10000.0, "2026-01-10", "cash", "paid"),
+    ])
+
+    first = generate_fee_statement(STUDENT_ID, "2026-01-01", "2026-01-31",
+                                    db_path=db_path, output_dir=statements_dir)
+    assert first["version"] == 1
+    v1_content = Path(first["file_path"]).read_text()
+
+    # A January transaction -- inside the requested period -- materially
+    # changes the relevant ledger state.
+    _insert(db_path, [
+        (906, STUDENT_ID, "Term1", 5000.0, 5000.0, "2026-01-20", "cash", "paid"),
+    ])
+
+    second = generate_fee_statement(STUDENT_ID, "2026-01-01", "2026-01-31",
+                                     db_path=db_path, output_dir=statements_dir)
+    assert second["version"] == 2
+
+    stored_v1 = get_statement_version(STUDENT_ID, "2026-01-01", "2026-01-31", 1,
+                                       db_path=db_path)
+    assert stored_v1["ok"] is True
+    assert stored_v1["content"] == v1_content  # version 1 untouched by v2's creation
+
+
+def test_stmt003_nonexistent_version_returns_exact_error(db_path, statements_dir):
+    _insert(db_path, [
+        (907, STUDENT_ID, "Term1", 10000.0, 10000.0, "2026-01-10", "cash", "paid"),
+    ])
+    generate_fee_statement(STUDENT_ID, "2026-01-01", "2026-01-31",
+                            db_path=db_path, output_dir=statements_dir)  # version 1
+
+    _insert(db_path, [
+        (908, STUDENT_ID, "Term1", 5000.0, 5000.0, "2026-01-22", "cash", "paid"),
+    ])
+    generate_fee_statement(STUDENT_ID, "2026-01-01", "2026-01-31",
+                            db_path=db_path, output_dir=statements_dir)  # version 2
+
+    result = get_statement_version(STUDENT_ID, "2026-01-01", "2026-01-31", 3,
+                                    db_path=db_path)
+
+    assert result["ok"] is False
+    assert result["error"] == "Version 3 has not been issued for this statement."
