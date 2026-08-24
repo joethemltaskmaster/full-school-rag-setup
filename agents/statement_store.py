@@ -28,10 +28,26 @@ import hashlib
 import json
 import sqlite3
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from date_utils import is_strict_iso_date
+
+WAT = timezone(timedelta(hours=1))  # West Africa Time, UTC+1, no DST
+
+
+def _now_wat_iso() -> str:
+    """
+    Current time in West Africa Time, millisecond precision, explicit
+    offset -- e.g. '2026-08-24T14:03:07.481+01:00'. Computed in Python
+    (not left to SQLite's DEFAULT) specifically so this exact value can
+    be embedded in a version's rendered header BEFORE the row is
+    inserted, guaranteeing the header and the stored/persisted
+    timestamp can never drift apart.
+    """
+    now = datetime.now(timezone.utc).astimezone(WAT)
+    return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}+01:00"
 
 
 def _find_database_dir(start_path: Path, max_levels: int = 6) -> Path:
@@ -278,13 +294,35 @@ def get_or_create_version(
     start: str,
     end: str,
     fingerprint: str,
-    statement_content: str,
+    body_text: str,
+    finalize_content,
 ) -> dict:
     """
     Atomically decides between "reuse the existing version" and
     "create version + 1", and returns the version that should be used.
     This is the WRITER path -- the only statement_store function
     allowed to run DDL (via _connect(..., ensure_table=True)).
+
+    `body_text` is the rendered statement body WITHOUT any version/
+    timestamp header (fee_statement.py's render_text() output,
+    unchanged) -- it's what get compared/fingerprinted upstream, and
+    it's independent of which version number this ends up being.
+
+    `finalize_content(version: int, generated_at: str) -> str` is
+    called ONLY when a brand-new version is being created, after this
+    function has already determined what that version number and
+    timestamp will be but BEFORE the row is inserted. This is what lets
+    the caller embed "Version: N (generated ...)" directly into the
+    text that gets stored/written -- the artifact a person actually
+    opens, the DB row, and get_statement_version()'s "content" are
+    therefore always the exact same bytes; there's no separate
+    "logged" timestamp that could ever drift from what the file says.
+
+    generated_at is computed once, in Python (see _now_wat_iso), and
+    inserted as an explicit value rather than left to the column's SQL
+    DEFAULT -- so the exact same timestamp used in the header is the
+    one persisted, with no risk of the two disagreeing by a few
+    milliseconds.
 
     Runs the read-compare-and-maybe-insert sequence inside a single
     BEGIN IMMEDIATE transaction, so two concurrent requests for the
@@ -304,6 +342,8 @@ def get_or_create_version(
     Returns:
         {"version": int, "sequence": int, "fingerprint": str,
          "statement_content": str, "generated_at": str, "created": bool}
+    `statement_content` is always the FINAL text (header + body) --
+    exactly what was/should be written to disk.
     """
     _validate_period(start, end)
     conn = _connect(db_path, ensure_table=True)
@@ -324,11 +364,14 @@ def get_or_create_version(
                 return result
 
             next_version = (latest["version"] if latest is not None else 0) + 1
+            generated_at = _now_wat_iso()
+            final_content = finalize_content(next_version, generated_at)
             conn.execute(
                 """INSERT INTO statement_versions
-                   (student_id, period_start, period_end, version, fingerprint, statement_content)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (student_id, start, end, next_version, fingerprint, statement_content),
+                   (student_id, period_start, period_end, version, fingerprint,
+                    statement_content, generated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (student_id, start, end, next_version, fingerprint, final_content, generated_at),
             )
             row = conn.execute(
                 """SELECT * FROM statement_versions
