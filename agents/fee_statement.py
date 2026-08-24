@@ -32,21 +32,18 @@ Public entrypoint:
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
-from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any
 
 from db_service import SchoolDB
+from date_utils import is_strict_iso_date as _is_strict_iso_date
 import statement_store
 
 # agents/fee_statement.py -> repo root is one level up from agents/
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_STATEMENTS_DIR = REPO_ROOT / "statements"
-
-ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 QUANTUM = Decimal("0.01")
 
@@ -87,21 +84,6 @@ def _quantize_amount(raw_value: Any) -> Decimal:
         raise FeeStatementError("Cannot quantize a null amount.")
     shortest_round_trip_string = str(float(raw_value))
     return Decimal(shortest_round_trip_string).quantize(QUANTUM, rounding=ROUND_HALF_UP)
-
-
-def _is_strict_iso_date(value: Any) -> bool:
-    """True only for a real calendar date in exactly YYYY-MM-DD form --
-    no other separators, no two-digit years, no fuzzy/lenient parsing,
-    and rejects shapes that pass the regex but aren't real dates
-    (e.g. 2025-02-30)."""
-    if not isinstance(value, str) or not ISO_DATE_RE.match(value):
-        return False
-    try:
-        year, month, day = (int(part) for part in value.split("-"))
-        date(year, month, day)
-        return True
-    except ValueError:
-        return False
 
 
 # =========================================================================
@@ -233,8 +215,12 @@ class FeeStatementResult:
         return "\n".join(out) + "\n"
 
 
-def _file_name(student_id: Any, start: str, end: str) -> str:
-    return f"statement_{student_id}_{start}_{end}.txt"
+def _file_name(student_id: Any, start: str, end: str, version: int) -> str:
+    # Version is part of the filename, deliberately: a statement file is
+    # a historical artifact once written, and giving each version its
+    # own path is what makes "version 1's file is never touched again"
+    # true on disk, not just in the database.
+    return f"statement_{student_id}_{start}_{end}_v{version}.txt"
 
 
 def generate_fee_statement(
@@ -319,27 +305,34 @@ def generate_fee_statement(
     # date outside [start, end] are correctly excluded above and never
     # reach this point, so unrelated ledger activity outside the
     # requested period can never change the fingerprint or version.
+    #
+    # get_or_create_version() makes the "reuse vs. create" decision and
+    # the insert (if any) one atomic operation, so two concurrent
+    # requests for the same student+period can't both decide to create
+    # version 2.
     # =====================================================================
     relevant_rows = placeable_rows + unplaceable_rows
     fingerprint = statement_store.compute_fingerprint(student_id, start, end, relevant_rows)
+    freshly_rendered_content = result.render_text()
 
-    content_text = result.render_text()
-    latest = statement_store.get_latest_version(db_path, student_id, start, end)
-    if latest is not None and latest["fingerprint"] == fingerprint:
-        # Relevant ledger state is unchanged -- reuse the existing
-        # version and its exact stored content, so the returned/written
-        # statement is byte-for-byte identical to the original.
-        version = latest["version"]
-        content_text = latest["statement_content"]
-    else:
-        version = statement_store.create_version(
-            db_path, student_id, start, end, fingerprint, content_text
-        )
+    version_record = statement_store.get_or_create_version(
+        db_path, student_id, start, end, fingerprint, freshly_rendered_content
+    )
+    version = version_record["version"]
+    generated_at = version_record["generated_at"]
 
     target_dir = Path(output_dir) if output_dir is not None else DEFAULT_STATEMENTS_DIR
     target_dir.mkdir(parents=True, exist_ok=True)
-    file_path = target_dir / _file_name(student_id, start, end)
-    file_path.write_text(content_text, encoding="utf-8")
+    file_path = target_dir / _file_name(student_id, start, end, version)
+
+    if version_record["created"] or not file_path.exists():
+        # Write only when this version is brand-new, or -- defensively
+        # -- when an existing version's file is somehow missing on disk
+        # (e.g. output_dir changed, or the file was removed out of
+        # band). Either way we write the STORED content, never a fresh
+        # re-render, so an existing version's file is never replaced
+        # with a newer rendering of the same version.
+        file_path.write_text(version_record["statement_content"], encoding="utf-8")
     result.file_path = str(file_path)
 
     return {
@@ -347,6 +340,7 @@ def generate_fee_statement(
         "file_path": str(file_path),
         "status": generation_status,
         "version": version,
+        "generated_at": generated_at,
         "total": str(total),
         "line_count": len(lines),
         "unplaceable_count": len(unplaceable_rows),
@@ -361,6 +355,7 @@ def get_statement_version(
     end: str,
     version: int,
     db_path: str = "school.db",
+    output_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     """
     Retrieve a previously stored, immutable statement version for
@@ -368,25 +363,41 @@ def get_statement_version(
 
     Returns:
         {"ok": True, "version": ..., "content": ..., "fingerprint": ...,
-         "generated_at": ...}
+         "generated_at": ..., "file_path": ...}
     if that version was ever issued, or:
+        {"ok": False, "error": "..."}
+    for a malformed/inverted period (same messages generate_fee_statement()
+    uses), or:
         {"ok": False, "error": "Version {version} has not been issued
          for this statement."}
-    if it was not -- following the same {"ok": bool, ...} contract
-    generate_fee_statement() already uses for caller-facing outcomes.
+    if the period is valid but that version was never created --
+    following the same {"ok": bool, ...} contract generate_fee_statement()
+    already uses for caller-facing outcomes. Wording for the
+    non-existent-version case is exact and must not be changed.
     """
+    if not _is_strict_iso_date(start) or not _is_strict_iso_date(end):
+        return {"ok": False, "error": f"start ({start!r}) and end ({end!r}) must both be strict ISO dates (YYYY-MM-DD)."}
+
+    if start > end:
+        return {"ok": False, "error": "Start date is after end date"}
+
     stored = statement_store.get_version(db_path, student_id, start, end, version)
     if stored is None:
         return {
             "ok": False,
             "error": f"Version {version} has not been issued for this statement.",
         }
+
+    target_dir = Path(output_dir) if output_dir is not None else DEFAULT_STATEMENTS_DIR
+    file_path = target_dir / _file_name(student_id, start, end, stored["version"])
+
     return {
         "ok": True,
         "version": stored["version"],
         "content": stored["statement_content"],
         "fingerprint": stored["fingerprint"],
         "generated_at": stored["generated_at"],
+        "file_path": str(file_path),
     }
 
 

@@ -297,6 +297,20 @@ def test_rounding_uses_decimal_half_up_not_float_round(db_path, statements_dir):
 # STMT-003 -- statement versioning acceptance tests
 # =========================================================================
 
+def _update_payment(db_path: str, payment_id: int, **fields) -> None:
+    """Raw UPDATE against fees_payment -- used to test STMT-003's
+    "an existing payment was corrected" scenario, as opposed to a new
+    payment being inserted."""
+    conn = sqlite3.connect(db_path)
+    set_clause = ", ".join(f"{col} = ?" for col in fields)
+    conn.execute(
+        f"UPDATE fees_payment SET {set_clause} WHERE payment_id = ?",
+        tuple(fields.values()) + (payment_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
 def test_stmt003_first_statement_is_version_1(db_path, statements_dir):
     _insert(db_path, [
         (901, STUDENT_ID, "Term1", 10000.0, 10000.0, "2026-01-10", "cash", "paid"),
@@ -307,6 +321,7 @@ def test_stmt003_first_statement_is_version_1(db_path, statements_dir):
 
     assert result["ok"] is True
     assert result["version"] == 1
+    assert result["generated_at"]  # a real timestamp was recorded
 
 
 def test_stmt003_identical_request_returns_same_version_and_byte_identical_content(
@@ -324,6 +339,14 @@ def test_stmt003_identical_request_returns_same_version_and_byte_identical_conte
     assert first["version"] == 1
     assert second["version"] == 1
 
+    # generated_at must be the ORIGINAL version 1 timestamp, not a new
+    # one from this second call -- proves the second call truly reused
+    # the stored version instead of quietly re-creating it.
+    assert second["generated_at"] == first["generated_at"]
+
+    # Same version -> same file path, and the content on disk is
+    # byte-for-byte identical.
+    assert first["file_path"] == second["file_path"]
     first_content = Path(first["file_path"]).read_text()
     second_content = Path(second["file_path"]).read_text()
     assert first_content == second_content
@@ -334,8 +357,8 @@ def test_stmt003_change_outside_period_does_not_bump_version(db_path, statements
         (903, STUDENT_ID, "Term1", 10000.0, 10000.0, "2026-01-10", "cash", "paid"),
     ])
 
-    generate_fee_statement(STUDENT_ID, "2026-01-01", "2026-01-31",
-                            db_path=db_path, output_dir=statements_dir)
+    first = generate_fee_statement(STUDENT_ID, "2026-01-01", "2026-01-31",
+                                    db_path=db_path, output_dir=statements_dir)
 
     # A February transaction -- outside the requested January period --
     # must not affect the January statement's version.
@@ -347,6 +370,7 @@ def test_stmt003_change_outside_period_does_not_bump_version(db_path, statements
                                      db_path=db_path, output_dir=statements_dir)
 
     assert result["version"] == 1
+    assert result["generated_at"] == first["generated_at"]
 
 
 def test_stmt003_change_inside_period_bumps_version_and_preserves_v1(
@@ -359,7 +383,8 @@ def test_stmt003_change_inside_period_bumps_version_and_preserves_v1(
     first = generate_fee_statement(STUDENT_ID, "2026-01-01", "2026-01-31",
                                     db_path=db_path, output_dir=statements_dir)
     assert first["version"] == 1
-    v1_content = Path(first["file_path"]).read_text()
+    v1_path = Path(first["file_path"])
+    v1_content_before = v1_path.read_text()
 
     # A January transaction -- inside the requested period -- materially
     # changes the relevant ledger state.
@@ -370,11 +395,40 @@ def test_stmt003_change_inside_period_bumps_version_and_preserves_v1(
     second = generate_fee_statement(STUDENT_ID, "2026-01-01", "2026-01-31",
                                      db_path=db_path, output_dir=statements_dir)
     assert second["version"] == 2
+    assert second["file_path"] != first["file_path"]  # distinct, version-specific files
+
+    # Reread the ACTUAL v1 file from disk (not just the DB row) now that
+    # v2 exists -- proves v2's creation never touched the v1 artifact.
+    assert v1_path.exists()
+    assert v1_path.read_text() == v1_content_before
 
     stored_v1 = get_statement_version(STUDENT_ID, "2026-01-01", "2026-01-31", 1,
                                        db_path=db_path)
     assert stored_v1["ok"] is True
-    assert stored_v1["content"] == v1_content  # version 1 untouched by v2's creation
+    assert stored_v1["content"] == v1_content_before
+    assert stored_v1["generated_at"] == first["generated_at"]  # untouched
+
+
+def test_stmt003_correction_via_update_bumps_version(db_path, statements_dir):
+    """An existing payment being CORRECTED (UPDATE), not a new payment
+    being added (INSERT), must also be treated as a material change
+    inside the period."""
+    _insert(db_path, [
+        (909, STUDENT_ID, "Term1", 10000.0, 8000.0, "2026-01-12", "cash", "partial"),
+    ])
+
+    first = generate_fee_statement(STUDENT_ID, "2026-01-01", "2026-01-31",
+                                    db_path=db_path, output_dir=statements_dir)
+    assert first["version"] == 1
+    assert first["total"] == "8000.00"
+
+    # Correction: the cashier had mistyped the amount -- fix the existing row.
+    _update_payment(db_path, 909, amount_paid=9500.0, status="partial")
+
+    second = generate_fee_statement(STUDENT_ID, "2026-01-01", "2026-01-31",
+                                     db_path=db_path, output_dir=statements_dir)
+    assert second["version"] == 2
+    assert second["total"] == "9500.00"
 
 
 def test_stmt003_nonexistent_version_returns_exact_error(db_path, statements_dir):
@@ -395,3 +449,30 @@ def test_stmt003_nonexistent_version_returns_exact_error(db_path, statements_dir
 
     assert result["ok"] is False
     assert result["error"] == "Version 3 has not been issued for this statement."
+
+
+def test_stmt003_statement_versions_table_blocks_update_and_delete(db_path, statements_dir):
+    """The immutability guarantee is enforced by the database itself,
+    not just by application code choosing never to call UPDATE/DELETE."""
+    _insert(db_path, [
+        (910, STUDENT_ID, "Term1", 10000.0, 10000.0, "2026-01-10", "cash", "paid"),
+    ])
+    generate_fee_statement(STUDENT_ID, "2026-01-01", "2026-01-31",
+                            db_path=db_path, output_dir=statements_dir)  # version 1
+
+    conn = sqlite3.connect(db_path)
+    try:
+        with pytest.raises(sqlite3.DatabaseError):
+            conn.execute(
+                "UPDATE statement_versions SET statement_content = 'tampered' WHERE version = 1"
+            )
+        with pytest.raises(sqlite3.DatabaseError):
+            conn.execute("DELETE FROM statement_versions WHERE version = 1")
+    finally:
+        conn.close()
+
+    # Confirm the row genuinely survived both attempts, untouched.
+    stored_v1 = get_statement_version(STUDENT_ID, "2026-01-01", "2026-01-31", 1,
+                                       db_path=db_path)
+    assert stored_v1["ok"] is True
+    assert stored_v1["content"] != "tampered"
