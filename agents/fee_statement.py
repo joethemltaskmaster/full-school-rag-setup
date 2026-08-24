@@ -298,12 +298,11 @@ def generate_fee_statement(
     # STMT-003 -- statement versioning, inserted AFTER statement content
     # is completely generated so it never influences generation itself.
     #
-    # Only rows that could possibly influence the printed statement are
-    # fingerprinted: placeable rows (in-period, drive lines/total) plus
-    # unplaceable rows (can't be date-ruled-out of the period, and are
-    # themselves rendered into the statement). Rows with a *valid* ISO
-    # date outside [start, end] are correctly excluded above and never
-    # reach this point, so unrelated ledger activity outside the
+    # placeable_rows and unplaceable_rows are passed as SEPARATE groups
+    # -- compute_fingerprint() hashes each differently, matching how
+    # each is actually rendered (see its docstring). Rows with a *valid*
+    # ISO date outside [start, end] are correctly excluded above and
+    # never reach this point, so unrelated ledger activity outside the
     # requested period can never change the fingerprint or version.
     #
     # get_or_create_version() makes the "reuse vs. create" decision and
@@ -311,14 +310,16 @@ def generate_fee_statement(
     # requests for the same student+period can't both decide to create
     # version 2.
     # =====================================================================
-    relevant_rows = placeable_rows + unplaceable_rows
-    fingerprint = statement_store.compute_fingerprint(student_id, start, end, relevant_rows)
+    fingerprint = statement_store.compute_fingerprint(
+        student_id, start, end, placeable_rows, unplaceable_rows
+    )
     freshly_rendered_content = result.render_text()
 
     version_record = statement_store.get_or_create_version(
         db_path, student_id, start, end, fingerprint, freshly_rendered_content
     )
     version = version_record["version"]
+    sequence = version_record["sequence"]
     generated_at = version_record["generated_at"]
 
     target_dir = Path(output_dir) if output_dir is not None else DEFAULT_STATEMENTS_DIR
@@ -340,6 +341,7 @@ def generate_fee_statement(
         "file_path": str(file_path),
         "status": generation_status,
         "version": version,
+        "sequence": sequence,
         "generated_at": generated_at,
         "total": str(total),
         "line_count": len(lines),
@@ -362,8 +364,8 @@ def get_statement_version(
     student_id + [start, end].
 
     Returns:
-        {"ok": True, "version": ..., "content": ..., "fingerprint": ...,
-         "generated_at": ..., "file_path": ...}
+        {"ok": True, "version": ..., "sequence": ..., "content": ...,
+         "fingerprint": ..., "generated_at": ..., "file_path": ...}
     if that version was ever issued, or:
         {"ok": False, "error": "..."}
     for a malformed/inverted period (same messages generate_fee_statement()
@@ -394,6 +396,7 @@ def get_statement_version(
     return {
         "ok": True,
         "version": stored["version"],
+        "sequence": stored["sequence"],
         "content": stored["statement_content"],
         "fingerprint": stored["fingerprint"],
         "generated_at": stored["generated_at"],

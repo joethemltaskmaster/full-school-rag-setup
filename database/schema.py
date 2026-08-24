@@ -44,7 +44,19 @@ CREATE TABLE IF NOT EXISTS statement_versions (
     version              INTEGER NOT NULL,
     fingerprint          TEXT NOT NULL,       -- sha256 of relevant ledger state
     statement_content    TEXT NOT NULL,       -- full rendered statement text
-    generated_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    generated_at         TEXT NOT NULL
+        DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+1 hours') || '+01:00'),
+    -- WAT (West Africa Time, UTC+1, no DST) with millisecond
+    -- precision and an explicit offset, e.g.
+    -- '2026-08-24T14:03:07.481+01:00'. Plain datetime('now') gave
+    -- second-resolution UTC with no timezone label -- not enough to
+    -- tell apart two versions created in the same second, and not in
+    -- the timezone this system's users actually operate in.
+    -- `version_id` (the AUTOINCREMENT primary key above) is ALSO a
+    -- global, strictly-increasing, clock-independent sequence --
+    -- exposed to callers as `sequence` (see agents/statement_store.py)
+    -- for an unambiguous tiebreaker that never depends on clock
+    -- resolution or timezone at all.
     UNIQUE (student_id, period_start, period_end, version)
 );
 """

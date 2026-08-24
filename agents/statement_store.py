@@ -17,11 +17,9 @@ retrieves whatever content/fingerprint it is given.
 
 Table DDL is NOT declared here. database/schema.py is the single
 source of truth for the statement_versions schema (table + immutability
-triggers); this module imports and calls create_statement_versions_table()
-so that even a caller who never ran the full schema/migration (e.g. a
-test using a throwaway sqlite file) still gets the real table shape --
-there is exactly one CREATE TABLE for statement_versions in the whole
-codebase.
+triggers). Only the writer path (get_or_create_version) ensures the
+table/triggers exist -- see _connect()'s `ensure_table` parameter and
+the note on the two read-only functions below.
 """
 
 from __future__ import annotations
@@ -35,8 +33,32 @@ from typing import Any
 
 from date_utils import is_strict_iso_date
 
-# database/schema.py lives one directory above agents/, under database/.
-_DATABASE_DIR = Path(__file__).resolve().parent.parent / "database"
+
+def _find_database_dir(start_path: Path, max_levels: int = 6) -> Path:
+    """
+    Walk upward from `start_path` looking for a `database/schema.py`,
+    instead of assuming a fixed number of `.parent` hops to the repo
+    root. See add_statement_versions_table.py's copy of this same
+    helper for the full rationale -- a hardcoded depth broke as soon
+    as a file's actual location didn't match the assumption; walking
+    up (bounded) is self-correcting.
+    """
+    current = start_path
+    for _ in range(max_levels):
+        candidate = current / "database"
+        if (candidate / "schema.py").is_file():
+            return candidate
+        if current.parent == current:
+            break
+        current = current.parent
+
+    raise RuntimeError(
+        f"Could not locate 'database/schema.py' by walking up from "
+        f"{start_path} (checked {max_levels} parent director(ies))."
+    )
+
+
+_DATABASE_DIR = _find_database_dir(Path(__file__).resolve().parent)
 if str(_DATABASE_DIR) not in sys.path:
     sys.path.insert(0, str(_DATABASE_DIR))
 
@@ -48,7 +70,7 @@ from schema import create_statement_versions_table  # noqa: E402
 # fingerprint so a future contract change can force new versions
 # everywhere, rather than silently reusing content generated under a
 # since-changed contract.
-RENDERER_CONTRACT_VERSION = "STMT-001.v1"
+RENDERER_CONTRACT_VERSION = "STMT-001.v2"  # bumped: unplaceable-row hashing narrowed
 
 
 class PeriodFormatError(ValueError):
@@ -67,12 +89,26 @@ def _validate_period(start: str, end: str) -> None:
         raise PeriodFormatError("Start date is after end date")
 
 
-def _connect(db_path: str) -> sqlite3.Connection:
+def _connect(db_path: str, ensure_table: bool = False) -> sqlite3.Connection:
+    """
+    `ensure_table` defaults to False: opening a connection is not, by
+    itself, allowed to run DDL. Only get_or_create_version() (the
+    writer) passes ensure_table=True -- it's the one path that can
+    legitimately need the table to exist before it can do its job, and
+    it's fully idempotent (CREATE TABLE / TRIGGER IF NOT EXISTS) so
+    calling it on every write is cheap and safe.
+
+    get_latest_version() and get_version() are pure readers: they pass
+    ensure_table=False and simply SELECT. If the table doesn't exist
+    yet (no statement has ever been generated for this database), they
+    catch the resulting "no such table" error and treat it as "no
+    matching row" rather than creating the table as a side effect of a
+    read.
+    """
     conn = sqlite3.connect(db_path)
-    # Autocommit mode: we manage transactions explicitly (BEGIN
-    # IMMEDIATE / COMMIT / ROLLBACK) in get_or_create_version() below,
-    # so sqlite3's own implicit-transaction handling must stay out of
-    # the way.
+    # Autocommit mode: get_or_create_version() manages transactions
+    # explicitly (BEGIN IMMEDIATE / COMMIT / ROLLBACK), so sqlite3's own
+    # implicit-transaction handling must stay out of the way.
     conn.isolation_level = None
     conn.execute("PRAGMA foreign_keys = ON;")
     # A concurrent writer that loses the race for the IMMEDIATE lock
@@ -80,60 +116,103 @@ def _connect(db_path: str) -> sqlite3.Connection:
     # "database is locked".
     conn.execute("PRAGMA busy_timeout = 5000;")
     conn.row_factory = sqlite3.Row
-    create_statement_versions_table(conn)
+    if ensure_table:
+        create_statement_versions_table(conn)
     return conn
 
 
+def _row_to_dict(row: sqlite3.Row) -> dict:
+    d = dict(row)
+    # version_id is the table's own AUTOINCREMENT primary key: a
+    # single, global, strictly-increasing integer across ALL students
+    # and ALL periods -- unlike `version`, which restarts at 1 for
+    # every new (student, period). Exposed explicitly as `sequence` so
+    # callers have an unambiguous, clock-independent tiebreaker/label
+    # for a specific stored artifact, on top of the human-facing
+    # per-period `version` number and the (now sub-second, WAT)
+    # `generated_at` timestamp.
+    d["sequence"] = d["version_id"]
+    return d
+
+
 def compute_fingerprint(
-    student_id: Any, start: str, end: str, relevant_rows: list[dict]
+    student_id: Any,
+    start: str,
+    end: str,
+    placeable_rows: list[dict],
+    unplaceable_rows: list[dict],
 ) -> str:
     """
     Deterministic fingerprint of the ledger state relevant to
     `student_id` over [start, end].
 
-    The caller is responsible for scoping `relevant_rows` to exactly
-    the rows that can influence the generated statement (placeable
-    rows within the period, plus unplaceable rows whose date can't
-    rule them out of the period) -- rows with a *valid* date outside
-    [start, end] must never be passed in here, which is what keeps
-    out-of-period ledger activity from ever changing the fingerprint
-    (STMT-003 Scenario C).
+    Callers must pass the SAME two row groups fee_statement.py itself
+    computed: placeable_rows (in-period, date-valid) and
+    unplaceable_rows (date can't rule them out of the period). Rows
+    with a *valid* date outside [start, end] must never be passed in
+    at all, which is what keeps out-of-period ledger activity from
+    ever changing the fingerprint (STMT-003 Scenario C).
 
-    Narrowing: `student_id` is dropped from each row before hashing --
-    it's already a fixed, outer fingerprint input (every row was
-    fetched for this same student), so keeping it per-row too would be
-    redundant, not "rendered content". No other column is dropped:
-    STMT-001's duplicate classification (_classify_by_payment_id /
-    _rows_identical in fee_statement.py) compares FULL rows, so a
-    change in any other column -- even one that isn't itself printed,
-    e.g. `term` -- can flip a group from "identical" to "conflicting"
-    and change RECONCILED -> BLOCKED, which is very much rendered
-    content. Dropping any of those columns here would make the
-    fingerprint blind to a real, contract-relevant change.
+    The two groups are hashed differently, because they're RENDERED
+    differently (see fee_statement.py's FeeStatementResult.render_text()):
+
+      - placeable_rows: hashed as full rows (minus `student_id`, which
+        is redundant -- see below). STMT-001's duplicate classification
+        (_classify_by_payment_id / _rows_identical) compares FULL rows,
+        so a change in any column here -- even one that isn't itself
+        printed, e.g. `term` -- can flip a group from "identical" to
+        "conflicting" and change RECONCILED -> BLOCKED. That's rendered
+        content, so nothing here can be dropped.
+
+      - unplaceable_rows: hashed as ONLY {payment_id, payment_date}.
+        These rows never go through duplicate classification at all --
+        they're rendered as a flat list showing exactly
+        `payment_id=... raw_payment_date=...` and nothing else. Hashing
+        the rest of their columns (amount_paid, term, status, ...)
+        would make the fingerprint -- and therefore the version --
+        change even though the rendered statement is byte-for-byte
+        identical, causing spurious version bumps for edits that are
+        genuinely invisible to this statement.
+
+    `student_id` is dropped from every row before hashing in both
+    groups: it's already a fixed, outer fingerprint input (every row
+    was fetched for this same student), so keeping it per-row too
+    would be redundant, not "rendered content".
 
     Determinism is guaranteed by:
       - serializing each row with sort_keys=True, so column order
         never matters
-      - sorting the resulting list of serialized rows, so raw
+      - sorting each group's list of serialized rows, so raw
         retrieval/dict ordering never matters
       - never including timestamps, random ids, or object identity
     """
     _validate_period(start, end)
-    serialized_rows = sorted(
+
+    placeable_serialized = sorted(
         json.dumps(
             {k: v for k, v in row.items() if k != "student_id"},
             sort_keys=True,
             default=str,
         )
-        for row in relevant_rows
+        for row in placeable_rows
     )
+    unplaceable_serialized = sorted(
+        json.dumps(
+            {"payment_id": row.get("payment_id"), "payment_date": row.get("payment_date")},
+            sort_keys=True,
+            default=str,
+        )
+        for row in unplaceable_rows
+    )
+
     payload = json.dumps(
         {
             "renderer_contract_version": RENDERER_CONTRACT_VERSION,
             "student_id": student_id,
             "start": start,
             "end": end,
-            "rows": serialized_rows,
+            "placeable_rows": placeable_serialized,
+            "unplaceable_rows": unplaceable_serialized,
         },
         sort_keys=True,
         default=str,
@@ -145,17 +224,24 @@ def get_latest_version(
     db_path: str, student_id: Any, start: str, end: str
 ) -> dict | None:
     """Latest stored version row for student+period, or None if no
-    version has ever been created."""
+    version has ever been created (including the case where
+    statement_versions doesn't exist in this database yet at all --
+    this is a pure reader and never creates it)."""
     _validate_period(start, end)
     conn = _connect(db_path)
     try:
-        row = conn.execute(
-            """SELECT * FROM statement_versions
-               WHERE student_id = ? AND period_start = ? AND period_end = ?
-               ORDER BY version DESC LIMIT 1""",
-            (student_id, start, end),
-        ).fetchone()
-        return dict(row) if row is not None else None
+        try:
+            row = conn.execute(
+                """SELECT * FROM statement_versions
+                   WHERE student_id = ? AND period_start = ? AND period_end = ?
+                   ORDER BY version DESC LIMIT 1""",
+                (student_id, start, end),
+            ).fetchone()
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc):
+                return None
+            raise
+        return _row_to_dict(row) if row is not None else None
     finally:
         conn.close()
 
@@ -164,17 +250,24 @@ def get_version(
     db_path: str, student_id: Any, start: str, end: str, version: int
 ) -> dict | None:
     """A specific stored version row for student+period, or None if
-    that version was never issued."""
+    that version was never issued (including the case where
+    statement_versions doesn't exist in this database yet at all --
+    this is a pure reader and never creates it)."""
     _validate_period(start, end)
     conn = _connect(db_path)
     try:
-        row = conn.execute(
-            """SELECT * FROM statement_versions
-               WHERE student_id = ? AND period_start = ? AND period_end = ?
-                 AND version = ?""",
-            (student_id, start, end, version),
-        ).fetchone()
-        return dict(row) if row is not None else None
+        try:
+            row = conn.execute(
+                """SELECT * FROM statement_versions
+                   WHERE student_id = ? AND period_start = ? AND period_end = ?
+                     AND version = ?""",
+                (student_id, start, end, version),
+            ).fetchone()
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc):
+                return None
+            raise
+        return _row_to_dict(row) if row is not None else None
     finally:
         conn.close()
 
@@ -190,6 +283,8 @@ def get_or_create_version(
     """
     Atomically decides between "reuse the existing version" and
     "create version + 1", and returns the version that should be used.
+    This is the WRITER path -- the only statement_store function
+    allowed to run DDL (via _connect(..., ensure_table=True)).
 
     Runs the read-compare-and-maybe-insert sequence inside a single
     BEGIN IMMEDIATE transaction, so two concurrent requests for the
@@ -207,11 +302,11 @@ def get_or_create_version(
     had a bug.
 
     Returns:
-        {"version": int, "fingerprint": str, "statement_content": str,
-         "generated_at": str, "created": bool}
+        {"version": int, "sequence": int, "fingerprint": str,
+         "statement_content": str, "generated_at": str, "created": bool}
     """
     _validate_period(start, end)
-    conn = _connect(db_path)
+    conn = _connect(db_path, ensure_table=True)
     try:
         conn.execute("BEGIN IMMEDIATE")
         try:
@@ -224,13 +319,9 @@ def get_or_create_version(
 
             if latest is not None and latest["fingerprint"] == fingerprint:
                 conn.execute("COMMIT")
-                return {
-                    "version": latest["version"],
-                    "fingerprint": latest["fingerprint"],
-                    "statement_content": latest["statement_content"],
-                    "generated_at": latest["generated_at"],
-                    "created": False,
-                }
+                result = _row_to_dict(latest)
+                result["created"] = False
+                return result
 
             next_version = (latest["version"] if latest is not None else 0) + 1
             conn.execute(
@@ -246,13 +337,9 @@ def get_or_create_version(
                 (student_id, start, end, next_version),
             ).fetchone()
             conn.execute("COMMIT")
-            return {
-                "version": row["version"],
-                "fingerprint": row["fingerprint"],
-                "statement_content": row["statement_content"],
-                "generated_at": row["generated_at"],
-                "created": True,
-            }
+            result = _row_to_dict(row)
+            result["created"] = True
+            return result
         except Exception:
             conn.execute("ROLLBACK")
             raise

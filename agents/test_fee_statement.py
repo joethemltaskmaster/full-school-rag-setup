@@ -476,3 +476,88 @@ def test_stmt003_statement_versions_table_blocks_update_and_delete(db_path, stat
                                        db_path=db_path)
     assert stored_v1["ok"] is True
     assert stored_v1["content"] != "tampered"
+
+
+def test_stmt003_unplaceable_row_irrelevant_field_change_does_not_bump_version(
+    db_path, statements_dir
+):
+    """An unplaceable row (malformed payment_date) is rendered showing
+    ONLY payment_id + raw payment_date -- a change to any other column
+    on that same row (amount_paid, term, status, ...) must NOT bump the
+    version, since the rendered statement is byte-for-byte unchanged."""
+    _insert(db_path, [
+        (911, STUDENT_ID, "Term1", 10000.0, 10000.0, "2026-01-10", "cash", "paid"),
+        (912, STUDENT_ID, "Term1", 5000.0, 5000.0, "09/15/2026", "cash", "paid"),  # malformed
+    ])
+
+    first = generate_fee_statement(STUDENT_ID, "2026-01-01", "2026-01-31",
+                                    db_path=db_path, output_dir=statements_dir)
+    assert first["version"] == 1
+    assert first["unplaceable_count"] == 1
+
+    # Change amount_paid/term/status on the unplaceable row -- none of
+    # these are ever rendered for an unplaceable row.
+    _update_payment(db_path, 912, amount_paid=1.0, term="Term2", status="pending")
+
+    second = generate_fee_statement(STUDENT_ID, "2026-01-01", "2026-01-31",
+                                     db_path=db_path, output_dir=statements_dir)
+    assert second["version"] == 1  # unchanged -- rendered content is identical
+    assert second["generated_at"] == first["generated_at"]
+
+    # But changing the malformed payment_date ITSELF (what actually gets
+    # printed for this row) must bump the version.
+    _update_payment(db_path, 912, payment_date="09/16/2026")
+
+    third = generate_fee_statement(STUDENT_ID, "2026-01-01", "2026-01-31",
+                                    db_path=db_path, output_dir=statements_dir)
+    assert third["version"] == 2
+
+
+def test_stmt003_reader_helpers_never_create_the_table(db_path, statements_dir):
+    """get_latest_version()/get_version() are pure readers: on a
+    database where no statement has ever been generated, they must
+    return None rather than creating statement_versions as a side
+    effect of a read."""
+    import statement_store
+
+    assert statement_store.get_latest_version(
+        db_path, STUDENT_ID, "2026-01-01", "2026-01-31"
+    ) is None
+    assert statement_store.get_version(
+        db_path, STUDENT_ID, "2026-01-01", "2026-01-31", 1
+    ) is None
+
+    conn = sqlite3.connect(db_path)
+    try:
+        exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='statement_versions'"
+        ).fetchone()
+        assert exists is None, "a pure read must never create statement_versions"
+    finally:
+        conn.close()
+
+
+def test_stmt003_generated_at_has_sub_second_precision_and_wat_offset(
+    db_path, statements_dir
+):
+    """generated_at must be precise enough to order two versions created
+    in the same second, and must carry an explicit WAT (+01:00) offset
+    rather than an unlabeled/UTC timestamp."""
+    _insert(db_path, [
+        (913, STUDENT_ID, "Term1", 10000.0, 10000.0, "2026-01-10", "cash", "paid"),
+    ])
+
+    result = generate_fee_statement(STUDENT_ID, "2026-01-01", "2026-01-31",
+                                     db_path=db_path, output_dir=statements_dir)
+
+    generated_at = result["generated_at"]
+    assert generated_at.endswith("+01:00"), generated_at  # explicit WAT offset
+    # Sub-second precision: a '.' followed by digits before the offset.
+    naive_part = generated_at.split("+01:00")[0]
+    assert "." in naive_part, f"expected sub-second precision, got {generated_at!r}"
+    fractional = naive_part.split(".")[1]
+    assert fractional.isdigit() and len(fractional) >= 3, generated_at
+
+    # A monotonic, clock-independent sequence is also available.
+    assert isinstance(result["sequence"], int)
+    assert result["sequence"] >= 1
