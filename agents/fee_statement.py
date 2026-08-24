@@ -223,6 +223,19 @@ def _file_name(student_id: Any, start: str, end: str, version: int) -> str:
     return f"statement_{student_id}_{start}_{end}_v{version}.txt"
 
 
+def _with_version_header(body_text: str, version: int, generated_at: str) -> str:
+    """
+    Prepends a "Version: N (generated ...)" line directly into the
+    rendered statement text -- so the version/timestamp is visible in
+    the actual artifact a person opens, not only in the API response
+    dict. Inserted as the second line (right after the
+    "Fee Statement -- student_id=..." line), before "Period: ...".
+    """
+    header_line = f"Version: {version} (generated {generated_at})\n"
+    first_newline = body_text.index("\n")
+    return body_text[: first_newline + 1] + header_line + body_text[first_newline + 1 :]
+
+
 def generate_fee_statement(
     student_id: Any,
     start: str,
@@ -305,6 +318,14 @@ def generate_fee_statement(
     # never reach this point, so unrelated ledger activity outside the
     # requested period can never change the fingerprint or version.
     #
+    # body_text is the version-agnostic rendered statement (unchanged
+    # from before). get_or_create_version() determines version/
+    # generated_at BEFORE inserting, and calls back into
+    # _with_version_header() to build the actual final text -- so the
+    # DB row, the file written below, and get_statement_version()'s
+    # "content" are always identical bytes, and the version/timestamp
+    # is visible in the artifact itself, not just the API response.
+    #
     # get_or_create_version() makes the "reuse vs. create" decision and
     # the insert (if any) one atomic operation, so two concurrent
     # requests for the same student+period can't both decide to create
@@ -313,10 +334,13 @@ def generate_fee_statement(
     fingerprint = statement_store.compute_fingerprint(
         student_id, start, end, placeable_rows, unplaceable_rows
     )
-    freshly_rendered_content = result.render_text()
+    body_text = result.render_text()
 
     version_record = statement_store.get_or_create_version(
-        db_path, student_id, start, end, fingerprint, freshly_rendered_content
+        db_path, student_id, start, end, fingerprint, body_text,
+        finalize_content=lambda version, generated_at: _with_version_header(
+            body_text, version, generated_at
+        ),
     )
     version = version_record["version"]
     sequence = version_record["sequence"]
@@ -330,9 +354,10 @@ def generate_fee_statement(
         # Write only when this version is brand-new, or -- defensively
         # -- when an existing version's file is somehow missing on disk
         # (e.g. output_dir changed, or the file was removed out of
-        # band). Either way we write the STORED content, never a fresh
-        # re-render, so an existing version's file is never replaced
-        # with a newer rendering of the same version.
+        # band). Either way we write the STORED content (header
+        # included), never a fresh re-render, so an existing version's
+        # file is never replaced with a newer rendering of the same
+        # version.
         file_path.write_text(version_record["statement_content"], encoding="utf-8")
     result.file_path = str(file_path)
 
