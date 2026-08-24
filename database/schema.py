@@ -18,6 +18,80 @@ from pathlib import Path
 
 DB_NAME = "school.db"
 
+# =====================================================================
+# STATEMENT_VERSIONS (STMT-003) -- single source of truth for this
+# table's DDL. add_statement_versions_table.py (migration) and
+# agents/statement_store.py (lazy table creation for callers that don't
+# go through this module) both import create_statement_versions_table()
+# from here rather than each declaring their own CREATE TABLE -- there
+# is exactly one CREATE TABLE statement for statement_versions in the
+# whole codebase.
+#
+# No FOREIGN KEY to `students` here, deliberately: this table follows
+# the same "independent of the operational tables" precedent already
+# established by the ML feature tables (see add_ml_feature_tables.py)
+# -- a statement is a historical snapshot that should remain readable
+# even if the student record it was generated for is later archived or
+# removed, and it also has to work against throwaway/synthetic
+# databases used in tests that never define a `students` table at all.
+# =====================================================================
+STATEMENT_VERSIONS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS statement_versions (
+    version_id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    student_id           INTEGER NOT NULL,
+    period_start         TEXT NOT NULL,      -- 'YYYY-MM-DD', strict ISO
+    period_end           TEXT NOT NULL,      -- 'YYYY-MM-DD', strict ISO
+    version              INTEGER NOT NULL,
+    fingerprint          TEXT NOT NULL,       -- sha256 of relevant ledger state
+    statement_content    TEXT NOT NULL,       -- full rendered statement text
+    generated_at         TEXT NOT NULL
+        DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+1 hours') || '+01:00'),
+    -- WAT (West Africa Time, UTC+1, no DST) with millisecond
+    -- precision and an explicit offset, e.g.
+    -- '2026-08-24T14:03:07.481+01:00'. Plain datetime('now') gave
+    -- second-resolution UTC with no timezone label -- not enough to
+    -- tell apart two versions created in the same second, and not in
+    -- the timezone this system's users actually operate in.
+    -- `version_id` (the AUTOINCREMENT primary key above) is ALSO a
+    -- global, strictly-increasing, clock-independent sequence --
+    -- exposed to callers as `sequence` (see agents/statement_store.py)
+    -- for an unambiguous tiebreaker that never depends on clock
+    -- resolution or timezone at all.
+    UNIQUE (student_id, period_start, period_end, version)
+);
+"""
+
+# Old versions are historical snapshots: once written, a row must never
+# be changed or removed by anything (including a bug or a well-meaning
+# manual `UPDATE`/`DELETE`) -- these triggers enforce that at the
+# database layer itself, not just by convention in application code.
+STATEMENT_VERSIONS_TRIGGERS_SQL = [
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_statement_versions_no_update
+    BEFORE UPDATE ON statement_versions
+    BEGIN
+        SELECT RAISE(ABORT, 'statement_versions is immutable: UPDATE is not allowed');
+    END;
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_statement_versions_no_delete
+    BEFORE DELETE ON statement_versions
+    BEGIN
+        SELECT RAISE(ABORT, 'statement_versions is immutable: DELETE is not allowed');
+    END;
+    """,
+]
+
+
+def create_statement_versions_table(conn: sqlite3.Connection) -> None:
+    """Idempotent: CREATE TABLE/TRIGGER IF NOT EXISTS throughout, safe
+    to call on every startup and from every caller that needs the table
+    to exist."""
+    conn.execute(STATEMENT_VERSIONS_TABLE_SQL)
+    for trigger_sql in STATEMENT_VERSIONS_TRIGGERS_SQL:
+        conn.execute(trigger_sql)
+    conn.commit()
+
 
 def get_connection(db_name: str = DB_NAME) -> sqlite3.Connection:
     """Open a connection with foreign key enforcement turned on."""
@@ -164,6 +238,12 @@ def create_tables(conn: sqlite3.Connection) -> None:
             ON DELETE CASCADE
     );
     """)
+
+    # ---------------------------------------------------------------
+    # STATEMENT_VERSIONS  (STMT-003 -- immutable history of generated
+    # fee statements per student + requested period)
+    # ---------------------------------------------------------------
+    create_statement_versions_table(conn)
 
     # ---------------------------------------------------------------
     # GUARDIAN_MESSAGES  (school -> guardian communication log)

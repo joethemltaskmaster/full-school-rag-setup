@@ -32,20 +32,18 @@ Public entrypoint:
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
-from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any
 
 from db_service import SchoolDB
+from date_utils import is_strict_iso_date as _is_strict_iso_date
+import statement_store
 
 # agents/fee_statement.py -> repo root is one level up from agents/
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_STATEMENTS_DIR = REPO_ROOT / "statements"
-
-ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 QUANTUM = Decimal("0.01")
 
@@ -86,21 +84,6 @@ def _quantize_amount(raw_value: Any) -> Decimal:
         raise FeeStatementError("Cannot quantize a null amount.")
     shortest_round_trip_string = str(float(raw_value))
     return Decimal(shortest_round_trip_string).quantize(QUANTUM, rounding=ROUND_HALF_UP)
-
-
-def _is_strict_iso_date(value: Any) -> bool:
-    """True only for a real calendar date in exactly YYYY-MM-DD form --
-    no other separators, no two-digit years, no fuzzy/lenient parsing,
-    and rejects shapes that pass the regex but aren't real dates
-    (e.g. 2025-02-30)."""
-    if not isinstance(value, str) or not ISO_DATE_RE.match(value):
-        return False
-    try:
-        year, month, day = (int(part) for part in value.split("-"))
-        date(year, month, day)
-        return True
-    except ValueError:
-        return False
 
 
 # =========================================================================
@@ -232,8 +215,25 @@ class FeeStatementResult:
         return "\n".join(out) + "\n"
 
 
-def _file_name(student_id: Any, start: str, end: str) -> str:
-    return f"statement_{student_id}_{start}_{end}.txt"
+def _file_name(student_id: Any, start: str, end: str, version: int) -> str:
+    # Version is part of the filename, deliberately: a statement file is
+    # a historical artifact once written, and giving each version its
+    # own path is what makes "version 1's file is never touched again"
+    # true on disk, not just in the database.
+    return f"statement_{student_id}_{start}_{end}_v{version}.txt"
+
+
+def _with_version_header(body_text: str, version: int, generated_at: str) -> str:
+    """
+    Prepends a "Version: N (generated ...)" line directly into the
+    rendered statement text -- so the version/timestamp is visible in
+    the actual artifact a person opens, not only in the API response
+    dict. Inserted as the second line (right after the
+    "Fee Statement -- student_id=..." line), before "Period: ...".
+    """
+    header_line = f"Version: {version} (generated {generated_at})\n"
+    first_newline = body_text.index("\n")
+    return body_text[: first_newline + 1] + header_line + body_text[first_newline + 1 :]
 
 
 def generate_fee_statement(
@@ -307,21 +307,125 @@ def generate_fee_statement(
         conflicting=conflicting,
     )
 
+    # =====================================================================
+    # STMT-003 -- statement versioning, inserted AFTER statement content
+    # is completely generated so it never influences generation itself.
+    #
+    # placeable_rows and unplaceable_rows are passed as SEPARATE groups
+    # -- compute_fingerprint() hashes each differently, matching how
+    # each is actually rendered (see its docstring). Rows with a *valid*
+    # ISO date outside [start, end] are correctly excluded above and
+    # never reach this point, so unrelated ledger activity outside the
+    # requested period can never change the fingerprint or version.
+    #
+    # body_text is the version-agnostic rendered statement (unchanged
+    # from before). get_or_create_version() determines version/
+    # generated_at BEFORE inserting, and calls back into
+    # _with_version_header() to build the actual final text -- so the
+    # DB row, the file written below, and get_statement_version()'s
+    # "content" are always identical bytes, and the version/timestamp
+    # is visible in the artifact itself, not just the API response.
+    #
+    # get_or_create_version() makes the "reuse vs. create" decision and
+    # the insert (if any) one atomic operation, so two concurrent
+    # requests for the same student+period can't both decide to create
+    # version 2.
+    # =====================================================================
+    fingerprint = statement_store.compute_fingerprint(
+        student_id, start, end, placeable_rows, unplaceable_rows
+    )
+    body_text = result.render_text()
+
+    version_record = statement_store.get_or_create_version(
+        db_path, student_id, start, end, fingerprint, body_text,
+        finalize_content=lambda version, generated_at: _with_version_header(
+            body_text, version, generated_at
+        ),
+    )
+    version = version_record["version"]
+    sequence = version_record["sequence"]
+    generated_at = version_record["generated_at"]
+
     target_dir = Path(output_dir) if output_dir is not None else DEFAULT_STATEMENTS_DIR
     target_dir.mkdir(parents=True, exist_ok=True)
-    file_path = target_dir / _file_name(student_id, start, end)
-    file_path.write_text(result.render_text(), encoding="utf-8")
+    file_path = target_dir / _file_name(student_id, start, end, version)
+
+    if version_record["created"] or not file_path.exists():
+        # Write only when this version is brand-new, or -- defensively
+        # -- when an existing version's file is somehow missing on disk
+        # (e.g. output_dir changed, or the file was removed out of
+        # band). Either way we write the STORED content (header
+        # included), never a fresh re-render, so an existing version's
+        # file is never replaced with a newer rendering of the same
+        # version.
+        file_path.write_text(version_record["statement_content"], encoding="utf-8")
     result.file_path = str(file_path)
 
     return {
         "ok": True,
         "file_path": str(file_path),
         "status": generation_status,
+        "version": version,
+        "sequence": sequence,
+        "generated_at": generated_at,
         "total": str(total),
         "line_count": len(lines),
         "unplaceable_count": len(unplaceable_rows),
         "identical_duplicate_ids": identical_duplicate_ids,
         "conflicting_ids": list(conflicting.keys()),
+    }
+
+
+def get_statement_version(
+    student_id: Any,
+    start: str,
+    end: str,
+    version: int,
+    db_path: str = "school.db",
+    output_dir: str | Path | None = None,
+) -> dict[str, Any]:
+    """
+    Retrieve a previously stored, immutable statement version for
+    student_id + [start, end].
+
+    Returns:
+        {"ok": True, "version": ..., "sequence": ..., "content": ...,
+         "fingerprint": ..., "generated_at": ..., "file_path": ...}
+    if that version was ever issued, or:
+        {"ok": False, "error": "..."}
+    for a malformed/inverted period (same messages generate_fee_statement()
+    uses), or:
+        {"ok": False, "error": "Version {version} has not been issued
+         for this statement."}
+    if the period is valid but that version was never created --
+    following the same {"ok": bool, ...} contract generate_fee_statement()
+    already uses for caller-facing outcomes. Wording for the
+    non-existent-version case is exact and must not be changed.
+    """
+    if not _is_strict_iso_date(start) or not _is_strict_iso_date(end):
+        return {"ok": False, "error": f"start ({start!r}) and end ({end!r}) must both be strict ISO dates (YYYY-MM-DD)."}
+
+    if start > end:
+        return {"ok": False, "error": "Start date is after end date"}
+
+    stored = statement_store.get_version(db_path, student_id, start, end, version)
+    if stored is None:
+        return {
+            "ok": False,
+            "error": f"Version {version} has not been issued for this statement.",
+        }
+
+    target_dir = Path(output_dir) if output_dir is not None else DEFAULT_STATEMENTS_DIR
+    file_path = target_dir / _file_name(student_id, start, end, stored["version"])
+
+    return {
+        "ok": True,
+        "version": stored["version"],
+        "sequence": stored["sequence"],
+        "content": stored["statement_content"],
+        "fingerprint": stored["fingerprint"],
+        "generated_at": stored["generated_at"],
+        "file_path": str(file_path),
     }
 
 
