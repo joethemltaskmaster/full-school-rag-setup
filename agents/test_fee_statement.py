@@ -561,3 +561,46 @@ def test_stmt003_generated_at_has_sub_second_precision_and_wat_offset(
     # A monotonic, clock-independent sequence is also available.
     assert isinstance(result["sequence"], int)
     assert result["sequence"] >= 1
+
+
+def test_stmt003_file_on_disk_actually_contains_the_version_header(
+    db_path, statements_dir
+):
+    """The API response dict is not enough -- the ARTIFACT a guardian
+    opens must itself show which version it is and when it was
+    generated. This is what a person reading the .txt file sees, not
+    just what generate_fee_statement() returns."""
+    _insert(db_path, [
+        (914, STUDENT_ID, "Term1", 10000.0, 10000.0, "2026-01-10", "cash", "paid"),
+    ])
+
+    first = generate_fee_statement(STUDENT_ID, "2026-01-01", "2026-01-31",
+                                    db_path=db_path, output_dir=statements_dir)
+    file_content = Path(first["file_path"]).read_text()
+
+    assert f"Version: {first['version']}" in file_content
+    assert first["generated_at"] in file_content
+
+    # A second, materially different version must show its OWN version
+    # number and timestamp in ITS file -- and version 1's file must
+    # still show version 1's original header, untouched.
+    _insert(db_path, [
+        (915, STUDENT_ID, "Term1", 5000.0, 5000.0, "2026-01-20", "cash", "paid"),
+    ])
+    second = generate_fee_statement(STUDENT_ID, "2026-01-01", "2026-01-31",
+                                     db_path=db_path, output_dir=statements_dir)
+
+    v1_content_after = Path(first["file_path"]).read_text()
+    v2_content = Path(second["file_path"]).read_text()
+
+    assert f"Version: {first['version']}" in v1_content_after  # unchanged
+    assert f"Version: {second['version']}" in v2_content
+    assert first["generated_at"] in v1_content_after
+    assert second["generated_at"] in v2_content
+    assert first["generated_at"] != second["generated_at"]
+
+    # get_statement_version()'s "content" must be byte-identical to
+    # what's actually on disk -- no separate/drifted copy of the text.
+    stored_v1 = get_statement_version(STUDENT_ID, "2026-01-01", "2026-01-31", 1,
+                                       db_path=db_path)
+    assert stored_v1["content"] == v1_content_after
