@@ -288,6 +288,39 @@ def get_version(
         conn.close()
 
 
+def list_versions(db_path: str, student_id: Any, start: str, end: str) -> list[int]:
+    """
+    All stored version numbers for student+period, ascending, or an
+    empty list if none exist (including the case where
+    statement_versions doesn't exist in this database yet at all --
+    same pure-reader contract as get_latest_version()/get_version():
+    never creates the table).
+
+    Added for STMT-004 (Section 9): the CLI needs to report available
+    versions when a requested one doesn't exist (e.g. "Available
+    versions: 1-3."), and this is the smallest addition that lets it do
+    that without duplicating a query the CLI has no business running
+    directly against statement_versions itself.
+    """
+    _validate_period(start, end)
+    conn = _connect(db_path)
+    try:
+        try:
+            rows = conn.execute(
+                """SELECT version FROM statement_versions
+                   WHERE student_id = ? AND period_start = ? AND period_end = ?
+                   ORDER BY version ASC""",
+                (student_id, start, end),
+            ).fetchall()
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc):
+                return []
+            raise
+        return [row["version"] for row in rows]
+    finally:
+        conn.close()
+
+
 def get_or_create_version(
     db_path: str,
     student_id: Any,
