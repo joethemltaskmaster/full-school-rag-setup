@@ -176,8 +176,28 @@ def run(argv: list[str] | None = None) -> int:
     # lives in the destination's own directory so the replace is always
     # same-filesystem (a cross-filesystem replace is not guaranteed
     # atomic, and can fail outright on some platforms).
+    #
+    # mkstemp() deliberately creates its file mode 0600 (owner-only) --
+    # that's correct for a private scratch file, but wrong for the
+    # destination once the rename makes it permanent: permissions are a
+    # property of the inode, so whatever mkstemp set travels straight
+    # through os.replace() untouched. Left alone, --force over a file
+    # that was 0644 (e.g. shared with a colleague) would silently lock
+    # everyone else out, and a brand-new file would end up owner-only
+    # instead of respecting the umask the way open(mode="w") normally
+    # would. So the temp file's mode is explicitly set before the
+    # rename: match the existing destination's permissions if one is
+    # being overwritten, otherwise fall back to what a normal file
+    # creation would have produced under the current umask.
     try:
         dest_dir = output_path.resolve().parent
+        if output_path.exists():
+            target_mode = output_path.stat().st_mode & 0o777
+        else:
+            current_umask = os.umask(0)
+            os.umask(current_umask)
+            target_mode = 0o666 & ~current_umask
+
         fd, tmp_name = tempfile.mkstemp(
             dir=dest_dir, prefix=f".{output_path.name}.", suffix=".tmp"
         )
@@ -186,7 +206,28 @@ def run(argv: list[str] | None = None) -> int:
                 tmp_file.write(row["statement_content"])
                 tmp_file.flush()
                 os.fsync(tmp_file.fileno())
+            os.chmod(tmp_name, target_mode)
             os.replace(tmp_name, output_path)
+
+            # fsync()ing the file only guarantees its DATA and size are
+            # durable -- the rename itself is a change to the directory
+            # entry, which lives in the containing directory's own inode.
+            # Without fsyncing the directory too, a crash right after
+            # os.replace() returns can lose the rename on some
+            # filesystems even though the confirmation below already
+            # printed: the destination could come back missing, holding
+            # the old content, or still under the temp name. Directory
+            # fsync is a POSIX-only concept (no meaningful equivalent on
+            # Windows, where os.open() can't open a directory at all),
+            # so this is best-effort and never turns into a user-facing
+            # failure -- the file itself is already safely written and
+            # renamed at this point.
+            if os.name == "posix":
+                dir_fd = os.open(str(dest_dir), os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
         except OSError:
             Path(tmp_name).unlink(missing_ok=True)
             raise

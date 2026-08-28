@@ -370,3 +370,70 @@ def test_malformed_date_reports_clean_error(db_path, tmp_path, capsys):
     assert captured.out == ""
     assert "error" in captured.err.lower()
     assert "iso date" in captured.err.lower()
+
+
+# ---- Output file permissions: no silent lock-down to owner-only ------------
+def test_new_output_file_is_not_owner_only(db_path, tmp_path):
+    """A brand-new destination must get normal (umask-respecting)
+    permissions, not the 0600 mkstemp() defaults to for its private
+    scratch file -- mkstemp's mode must never leak through the rename."""
+    import stat
+
+    _seed_version(db_path, "the real content")
+    out_path = tmp_path / "out.txt"
+
+    exit_code = run([
+        "--student", str(STUDENT_ID), "--start", START, "--end", END,
+        "--output", str(out_path), "--db-path", db_path,
+    ])
+
+    assert exit_code == 0
+    mode = stat.S_IMODE(out_path.stat().st_mode)
+    # Group/other should not be entirely locked out the way 0600 would.
+    assert mode != 0o600
+    current_umask = os.umask(0)
+    os.umask(current_umask)
+    assert mode == (0o666 & ~current_umask)
+
+
+def test_force_overwrite_preserves_existing_file_permissions(db_path, tmp_path):
+    """--force must not silently strip permissions from a destination
+    that was shared (e.g. mode 0644) -- the rename must not leave the
+    file owner-only regardless of what it was before."""
+    import stat
+
+    seeded = _seed_version(db_path, "the real content")
+    out_path = tmp_path / "out.txt"
+    out_path.write_text("stale content")
+    out_path.chmod(0o644)
+
+    exit_code = run([
+        "--student", str(STUDENT_ID), "--start", START, "--end", END,
+        "--output", str(out_path), "--db-path", db_path, "--force",
+    ])
+
+    assert exit_code == 0
+    assert out_path.read_text() == seeded["statement_content"]
+    mode = stat.S_IMODE(out_path.stat().st_mode)
+    assert mode == 0o644
+
+
+def test_force_overwrite_preserves_restrictive_existing_permissions(db_path, tmp_path):
+    """The reverse case: an existing file that was already locked down
+    (e.g. 0600) must stay that way after --force, not get loosened."""
+    import stat
+
+    seeded = _seed_version(db_path, "the real content")
+    out_path = tmp_path / "out.txt"
+    out_path.write_text("stale content")
+    out_path.chmod(0o600)
+
+    exit_code = run([
+        "--student", str(STUDENT_ID), "--start", START, "--end", END,
+        "--output", str(out_path), "--db-path", db_path, "--force",
+    ])
+
+    assert exit_code == 0
+    assert out_path.read_text() == seeded["statement_content"]
+    mode = stat.S_IMODE(out_path.stat().st_mode)
+    assert mode == 0o600
