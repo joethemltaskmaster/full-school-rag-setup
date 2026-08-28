@@ -44,7 +44,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 # Matches this project's established convention for a script living
@@ -103,6 +105,18 @@ def run(argv: list[str] | None = None) -> int:
     """
     args = _parse_args(argv)
 
+    # This CLI is retrieval-only: it must never be the reason a database
+    # file comes into existence. sqlite3.connect() silently creates an
+    # empty file at any path that doesn't exist yet, which would turn a
+    # simple typo in --db-path into "no stored versions exist" -- an
+    # error that looks like "you haven't generated this statement" when
+    # the real problem is "you pointed me at the wrong file". Checking
+    # existence up front keeps that distinction intact and avoids the
+    # stray-file side effect entirely.
+    if not Path(args.db_path).exists():
+        print(f"Error: database not found at {args.db_path!r}.", file=sys.stderr)
+        return 1
+
     try:
         if args.version is None:
             row = get_latest_version(args.db_path, args.student, args.start, args.end)
@@ -148,7 +162,37 @@ def run(argv: list[str] | None = None) -> int:
     # newline translation on write (newline="" disables Python's
     # universal-newline rewriting so whatever line endings are already
     # in the stored string are preserved verbatim on disk).
-    output_path.write_text(row["statement_content"], encoding="utf-8", newline="")
+    #
+    # Written via a temp file in the SAME directory + os.replace() rather
+    # than a direct write_text(): write_text()/open(mode="w") truncates
+    # the destination the moment it's opened, so with --force over an
+    # existing file, a crash/kill/power-loss mid-write would leave the
+    # old content gone and a partial statement in its place -- with
+    # nothing marking it as incomplete. Writing to a sibling temp file
+    # first and only swapping it into place once the write is complete
+    # and flushed means the destination always holds either the untouched
+    # old content or the full new content, never a truncated prefix.
+    # os.replace() is atomic on both POSIX and Windows. The temp file
+    # lives in the destination's own directory so the replace is always
+    # same-filesystem (a cross-filesystem replace is not guaranteed
+    # atomic, and can fail outright on some platforms).
+    try:
+        dest_dir = output_path.resolve().parent
+        fd, tmp_name = tempfile.mkstemp(
+            dir=dest_dir, prefix=f".{output_path.name}.", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as tmp_file:
+                tmp_file.write(row["statement_content"])
+                tmp_file.flush()
+                os.fsync(tmp_file.fileno())
+            os.replace(tmp_name, output_path)
+        except OSError:
+            Path(tmp_name).unlink(missing_ok=True)
+            raise
+    except OSError as exc:
+        print(f"Error: could not write output file {output_path}: {exc}", file=sys.stderr)
+        return 1
 
     print(f"Statement version {row['version']} written to {output_path}.")
     return 0

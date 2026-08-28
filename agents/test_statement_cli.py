@@ -28,6 +28,7 @@ Acceptance criteria -> test map:
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -48,8 +49,19 @@ END = "2026-01-31"
 def db_path(tmp_path: Path) -> str:
     """statement_store.get_or_create_version() creates statement_versions
     itself (ensure_table=True on the writer path) -- no schema setup
-    needed here beyond a fresh sqlite file."""
-    return str(tmp_path / "school.db")
+    needed here beyond a fresh sqlite file.
+
+    The file is touched (created empty) rather than left as a bare path:
+    in production, school.db already exists (other tables live there
+    long before any fee statement is generated), so "no stored versions
+    for this student/period" and "this path was never a real database"
+    are two genuinely different situations. Touching the file here keeps
+    that distinction meaningful for tests that rely on the "no stored
+    versions" message; tests exercising the "--db-path doesn't exist at
+    all" case use a path that is deliberately never touched."""
+    path = tmp_path / "school.db"
+    path.touch()
+    return str(path)
 
 
 def _seed_version(db_path: str, body_text: str) -> dict:
@@ -232,3 +244,129 @@ def test_existing_output_overwritten_with_force(db_path, tmp_path):
     # the destination FILE gets overwritten.
     stored = get_version(db_path, STUDENT_ID, START, END, seeded["version"])
     assert stored["statement_content"] == seeded["statement_content"]
+
+
+# ---- Bad --output paths: one-line error, no traceback, no stray writes -----
+def test_output_path_is_a_directory_reports_clean_error(db_path, tmp_path, capsys):
+    _seed_version(db_path, "the real content")
+    out_dir = tmp_path / "a_directory"
+    out_dir.mkdir()
+
+    exit_code = run([
+        "--student", str(STUDENT_ID), "--start", START, "--end", END,
+        "--output", str(out_dir), "--db-path", db_path, "--force",
+    ])
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "error" in captured.err.lower()
+    assert str(out_dir) in captured.err
+    # No leftover temp files dropped in the parent directory (only the
+    # pre-existing db file and the output directory itself remain).
+    leftover = {p.name for p in tmp_path.iterdir()} - {Path(db_path).name, out_dir.name}
+    assert leftover == set()
+    assert out_dir.is_dir()
+
+
+def test_output_parent_directory_missing_reports_clean_error(db_path, tmp_path, capsys):
+    _seed_version(db_path, "the real content")
+    out_path = tmp_path / "does_not_exist" / "out.txt"
+
+    exit_code = run([
+        "--student", str(STUDENT_ID), "--start", START, "--end", END,
+        "--output", str(out_path), "--db-path", db_path,
+    ])
+
+    assert exit_code == 1
+    assert not out_path.exists()
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "error" in captured.err.lower()
+
+
+# ---- Atomic write: an interrupted overwrite must not truncate the file -----
+def test_write_failure_with_force_leaves_original_file_untouched(db_path, tmp_path, monkeypatch):
+    """Simulates a mid-write failure (e.g. disk full) by making the
+    temp-file write raise partway through. The destination -- which
+    open()/write_text() would have already truncated -- must still hold
+    the untouched original content, proving the swap-in only happens
+    after a complete, successful write."""
+    _seed_version(db_path, "the real content")
+    out_path = tmp_path / "out.txt"
+    out_path.write_text("original content that must survive a crash")
+
+    real_fsync = os.fsync
+
+    def failing_fsync(fd):
+        raise OSError("simulated disk failure")
+
+    monkeypatch.setattr(os, "fsync", failing_fsync)
+
+    exit_code = run([
+        "--student", str(STUDENT_ID), "--start", START, "--end", END,
+        "--output", str(out_path), "--db-path", db_path, "--force",
+    ])
+
+    monkeypatch.setattr(os, "fsync", real_fsync)
+
+    assert exit_code == 1
+    # Original content survives -- no truncated partial statement.
+    assert out_path.read_text() == "original content that must survive a crash"
+    # No stray temp file left behind either (only the pre-existing db
+    # file and the output file itself remain).
+    leftover = {p.name for p in tmp_path.iterdir()} - {Path(db_path).name, out_path.name}
+    assert leftover == set()
+
+
+# ---- --db-path pointing at a nonexistent file: error, not a stray file -----
+def test_missing_db_path_reports_error_and_creates_no_file(tmp_path, capsys):
+    missing_db = tmp_path / "typo_school.db"
+    out_path = tmp_path / "out.txt"
+
+    exit_code = run([
+        "--student", str(STUDENT_ID), "--start", START, "--end", END,
+        "--output", str(out_path), "--db-path", str(missing_db),
+    ])
+
+    assert exit_code == 1
+    # The whole point: a bad --db-path must not silently create an empty
+    # database file, and must not be reported as "no stored versions".
+    assert not missing_db.exists()
+    assert not out_path.exists()
+    captured = capsys.readouterr()
+    assert "not found" in captured.err.lower() or "database" in captured.err.lower()
+    assert "generate the statement first" not in captured.err.lower()
+
+
+# ---- PeriodFormatError surfaces as a clean one-line CLI error --------------
+def test_inverted_period_reports_clean_error(db_path, tmp_path, capsys):
+    out_path = tmp_path / "out.txt"
+
+    exit_code = run([
+        "--student", str(STUDENT_ID), "--start", END, "--end", START,  # inverted
+        "--output", str(out_path), "--db-path", db_path,
+    ])
+
+    assert exit_code == 1
+    assert not out_path.exists()
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "error" in captured.err.lower()
+    assert "start date is after end date" in captured.err.lower()
+
+
+def test_malformed_date_reports_clean_error(db_path, tmp_path, capsys):
+    out_path = tmp_path / "out.txt"
+
+    exit_code = run([
+        "--student", str(STUDENT_ID), "--start", "not-a-date", "--end", END,
+        "--output", str(out_path), "--db-path", db_path,
+    ])
+
+    assert exit_code == 1
+    assert not out_path.exists()
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "error" in captured.err.lower()
+    assert "iso date" in captured.err.lower()
