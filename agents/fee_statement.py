@@ -373,6 +373,16 @@ def generate_fee_statement(
         "unplaceable_count": len(unplaceable_rows),
         "identical_duplicate_ids": identical_duplicate_ids,
         "conflicting_ids": list(conflicting.keys()),
+        # STMT-005: exposed so an independent reconciler (or any other
+        # caller) can see exactly what this generation call produced
+        # without re-deriving it or re-parsing the rendered text.
+        # "payment_ids" is deliberately the SAME set as what's actually
+        # printed on the statement (the includable/non-conflicting
+        # lines) -- not every raw ledger row -- so it means the same
+        # thing here as "the statement's payment-ID set" means
+        # elsewhere in the STMT-005 contract.
+        "payment_ids": [line.payment_id for line in lines],
+        "fingerprint": fingerprint,
     }
 
 
