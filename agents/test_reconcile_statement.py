@@ -332,13 +332,17 @@ def test_fingerprint_unchanged_ledger_reconciles(db_path):
     assert result["recomputed_fingerprint"] == result["stored_fingerprint"] == gen["fingerprint"]
 
 
-def test_fingerprint_changed_ledger_fails(db_path):
+def test_fingerprint_changed_ledger_without_visible_diff_is_blocked(db_path):
+    """A ledger change that doesn't affect the printed payment-ID set
+    or total (e.g. payment_method corrected on an existing payment)
+    changes the fingerprint but is NOT proof the filed statement was
+    wrong -- it's the ordinary lifecycle of a ledger after a statement
+    is issued. This must be BLOCKED (blocked_reason=fingerprint_drift),
+    not FAILS -- FAILS is reserved for cases where the statement's own
+    printed content is demonstrably wrong."""
     pid = _seed_payment(db_path, payment_date="2026-01-05", amount_paid=40.0)
     gen = _generate(db_path)
 
-    # Change a column that affects the fingerprint but isn't part of
-    # the payment-id set check (e.g. payment_method) -- directly on
-    # the ledger, without regenerating.
     with SchoolDB(db_path) as db:
         db.conn.execute(
             "UPDATE fees_payment SET payment_method = ? WHERE payment_id = ?",
@@ -347,9 +351,14 @@ def test_fingerprint_changed_ledger_fails(db_path):
 
     result = reconcile_statement(STUDENT_ID, START, END, version=gen["version"], db_path=db_path)
 
-    assert result["verdict"] == FAILS
+    assert result["verdict"] == BLOCKED
+    assert result["blocked_reason"] == "fingerprint_drift"
     assert result["recomputed_fingerprint"] != result["stored_fingerprint"]
-    assert "Fingerprint mismatch" in result["explanation"]
+    # The visible surface (ids, total) still matched -- that's exactly
+    # why this isn't FAILS.
+    assert result["missing_payment_ids"] == []
+    assert result["extra_payment_ids"] == []
+    assert "not evidence the statement was wrong" in result["explanation"]
 
 
 # =============================================================================
@@ -425,6 +434,122 @@ def test_identical_duplicate_rows_do_not_block(db_path):
 
     result = reconcile_statement(STUDENT_ID, START, END, version=gen["version"], db_path=db_path)
     assert result["verdict"] == RECONCILES
+
+
+# =============================================================================
+# [medium] Set comparison alone can't prove "each id exactly once" --
+# a statement that prints the same payment_id twice (with the printed
+# total honestly covering both copies, and the ledger fingerprint
+# otherwise matching) must still FAIL, not RECONCILE.
+# =============================================================================
+def test_duplicate_payment_id_printed_twice_on_statement_fails(db_path):
+    pid = _seed_payment(db_path, payment_date="2026-01-05", amount_paid=40.0)
+    gen = _generate(db_path)
+    stored = get_version(db_path, STUDENT_ID, START, END, gen["version"])
+
+    original_line = f"  payment_id={pid} | amount_paid=40.00 | payment_date=2026-01-05 | payment_method=cash | status=paid"
+    assert original_line in stored["statement_content"]
+
+    # Print the SAME line twice and adjust the total to honestly cover
+    # both copies -- this is deliberately constructed so that the
+    # payment-ID SET check and the printed-total self-consistency check
+    # would both pass; only a check that actually counts occurrences
+    # can catch this.
+    doubled_content = stored["statement_content"].replace(
+        original_line, original_line + "\n" + original_line
+    ).replace("Total: 40.00", "Total: 80.00")
+    assert doubled_content.count(f"payment_id={pid} |") == 2
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """INSERT INTO statement_versions
+               (student_id, period_start, period_end, version, fingerprint,
+                statement_content, generated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (STUDENT_ID, START, END, gen["version"] + 1, stored["fingerprint"],
+             doubled_content, stored["generated_at"]),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = reconcile_statement(STUDENT_ID, START, END, version=gen["version"] + 1, db_path=db_path)
+
+    assert result["verdict"] == FAILS
+    assert str(pid) in result["duplicated_statement_payment_ids"]
+    assert "more than once" in result["explanation"]
+
+
+# =============================================================================
+# [low] A matched-but-unparseable printed line must FAIL verification,
+# not be silently dropped.
+# =============================================================================
+def test_corrupt_line_amount_fails_instead_of_being_dropped(db_path):
+    pid = _seed_payment(db_path, payment_date="2026-01-05", amount_paid=40.0)
+    gen = _generate(db_path)
+    stored = get_version(db_path, STUDENT_ID, START, END, gen["version"])
+
+    original_line = f"  payment_id={pid} | amount_paid=40.00 | payment_date=2026-01-05 | payment_method=cash | status=paid"
+    assert original_line in stored["statement_content"]
+    corrupted_content = stored["statement_content"].replace(
+        original_line,
+        f"  payment_id={pid} | amount_paid=abc | payment_date=2026-01-05 | payment_method=cash | status=paid",
+    )
+    assert corrupted_content != stored["statement_content"]
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """INSERT INTO statement_versions
+               (student_id, period_start, period_end, version, fingerprint,
+                statement_content, generated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (STUDENT_ID, START, END, gen["version"] + 1, stored["fingerprint"],
+             corrupted_content, stored["generated_at"]),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = reconcile_statement(STUDENT_ID, START, END, version=gen["version"] + 1, db_path=db_path)
+
+    assert result["verdict"] == FAILS
+    assert "malformed" in result["explanation"].lower()
+    # A malformed statement can't be certified via any downstream field.
+    assert result["statement_payment_ids"] is None
+    assert result["recomputed_fingerprint"] is None
+
+
+# =============================================================================
+# [low] Classification is a single shared function, not two independent
+# copies -- reconcile_statement.py calls fee_statement.classify_ledger_rows
+# directly rather than carrying its own copy of the rule.
+# =============================================================================
+def test_reconciler_uses_shared_classification_function(db_path):
+    import fee_statement as fee_statement_module
+    import reconcile_statement as rs
+
+    assert rs.classify_ledger_rows is fee_statement_module.classify_ledger_rows
+
+
+def test_shared_classification_produces_identical_results_for_generation_and_reconciliation(db_path):
+    """End-to-end confirmation that both call sites see the same
+    classification on the same raw rows -- the structural guarantee
+    the shared function provides."""
+    _seed_payment_with_id(db_path, payment_id=42, payment_date="2026-01-12", amount_paid=10.0)
+    _seed_payment_with_id(db_path, payment_id=42, payment_date="2026-01-12", amount_paid=99.0)
+    _seed_payment(db_path, payment_date="2026-01-20", amount_paid=15.0)
+
+    gen = _generate(db_path)  # generation classifies and reports BLOCKED
+    assert gen["status"] == "BLOCKED"
+    assert gen["conflicting_ids"] == [42]
+
+    result = reconcile_statement(STUDENT_ID, START, END, version=gen["version"], db_path=db_path)
+    # Reconciliation independently classified the SAME raw rows and
+    # arrived at the same conflicting id, via the shared function.
+    assert result["verdict"] == BLOCKED
+    assert result["conflicting_payment_ids"] == ["42"]
 
 
 # =============================================================================

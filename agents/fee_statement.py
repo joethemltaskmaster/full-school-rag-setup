@@ -236,6 +236,50 @@ def _with_version_header(body_text: str, version: int, generated_at: str) -> str
     return body_text[: first_newline + 1] + header_line + body_text[first_newline + 1 :]
 
 
+def classify_ledger_rows(
+    start: str, end: str, raw_rows: list[dict]
+) -> tuple[list[dict], list[dict], dict[Any, dict], dict[Any, list[dict]], list[Any]]:
+    """
+    STMT-001 period-membership + duplicate-payment_id classification,
+    applied to raw ledger rows.
+
+    Factored out (STMT-005) so this is the ONE place the classification
+    contract lives -- both generate_fee_statement() below and the
+    independent reconciler (reconcile_statement.py) call this same
+    function rather than each carrying its own copy. Two copies of a
+    contract-defined rule drift the moment one of them is edited; a
+    single shared function structurally can't drift from itself. This
+    does not compromise reconciliation's independence from *generation*
+    (STMT-005 section 2): reconcile_statement.py never calls
+    generate_fee_statement() or reuses its output, it only shares this
+    pure, generator-independent classification step, then goes on to
+    do its own fingerprinting and comparison.
+
+    Returns (placeable_rows, unplaceable_rows, includable, conflicting,
+    identical_duplicate_ids) -- see _classify_by_payment_id() for the
+    latter three.
+    """
+    placeable_rows: list[dict] = []
+    unplaceable_rows: list[dict] = []
+    for row in raw_rows:
+        payment_date = row.get("payment_date")
+        if _is_strict_iso_date(payment_date) and start <= payment_date <= end:
+            if row.get("amount_paid") is None:
+                # Mandatory field missing -- can't render a valid line;
+                # surface it the same way as a malformed date rather
+                # than crashing or silently skipping it.
+                unplaceable_rows.append(row)
+            else:
+                placeable_rows.append(row)
+        elif not _is_strict_iso_date(payment_date):
+            unplaceable_rows.append(row)
+        # else: a valid ISO date outside [start, end] -- correctly not
+        # part of this statement; not an anomaly, not surfaced.
+
+    includable, conflicting, identical_duplicate_ids = _classify_by_payment_id(placeable_rows)
+    return placeable_rows, unplaceable_rows, includable, conflicting, identical_duplicate_ids
+
+
 def generate_fee_statement(
     student_id: Any,
     start: str,
@@ -263,24 +307,8 @@ def generate_fee_statement(
     with SchoolDB(db_path) as db:
         raw_rows = db.get_fees_payment_in_range(student_id, start, end)
 
-    placeable_rows: list[dict] = []
-    unplaceable_rows: list[dict] = []
-    for row in raw_rows:
-        payment_date = row.get("payment_date")
-        if _is_strict_iso_date(payment_date) and start <= payment_date <= end:
-            if row.get("amount_paid") is None:
-                # Mandatory field missing -- can't render a valid line;
-                # surface it the same way as a malformed date rather
-                # than crashing or silently skipping it.
-                unplaceable_rows.append(row)
-            else:
-                placeable_rows.append(row)
-        elif not _is_strict_iso_date(payment_date):
-            unplaceable_rows.append(row)
-        # else: a valid ISO date outside [start, end] -- correctly not
-        # part of this statement; not an anomaly, not surfaced.
-
-    includable, conflicting, identical_duplicate_ids = _classify_by_payment_id(placeable_rows)
+    placeable_rows, unplaceable_rows, includable, conflicting, identical_duplicate_ids = \
+        classify_ledger_rows(start, end, raw_rows)
 
     lines = [
         StatementLine(
