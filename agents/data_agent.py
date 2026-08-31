@@ -25,6 +25,8 @@ from typing import Any, Callable
 
 from db_service import SchoolDB, RecordNotFoundError
 from fee_statement import generate_fee_statement
+from reconcile_statement import reconcile_statement, StatementNotFoundError
+from statement_store import PeriodFormatError
 
 
 class UnknownIntentError(Exception):
@@ -79,6 +81,12 @@ class SchoolAgent:
             # Not in _write_intents: it never mutates school.db, it only
             # reads the ledger and writes an output file under statements/.
             "generate_fee_statement": self._generate_fee_statement,
+
+            # ---- STMT-005 independent reconciliation ----
+            # Read-only: verifies a previously stored statement version
+            # against the live ledger. Never mutates data, never
+            # generates a new statement version.
+            "verify_fee_statement": self._verify_fee_statement,
 
             # ---- ML reference/demo tables (student_risk_records, fee_default_records) ----
             # These are the SYNTHETIC training datasets the models were built on
@@ -279,6 +287,23 @@ class SchoolAgent:
         if not result.get("ok"):
             raise ValueError(result.get("error", "Failed to generate fee statement."))
         return result
+
+    def _verify_fee_statement(self, student_id: int, start: str, end: str, version: int = None):
+        """Verifies a previously stored statement version against the
+        live ledger via the independent STMT-005 reconciler.
+
+        Preferred flow (STMT-005 section 12): data_agent -> this
+        wrapper -> reconcile_statement.py -> verification result. This
+        method contains NO reconciliation logic of its own -- it only
+        calls into reconcile_statement.reconcile_statement() and
+        surfaces its result (or re-raises its input-validation errors
+        as ValueError, matching _generate_fee_statement's convention
+        above, so handle()'s existing exception handling formats them
+        consistently)."""
+        try:
+            return reconcile_statement(student_id, start, end, version=version, db_path=self.db_path)
+        except (StatementNotFoundError, PeriodFormatError) as exc:
+            raise ValueError(str(exc)) from exc
 
     # ---- ML reference/demo table wrappers ----
     def _get_student_risk_record(self, student_id: str):

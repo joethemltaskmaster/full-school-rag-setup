@@ -33,12 +33,24 @@ which has no bearing on fee statements. --student is therefore parsed
 as int here, matching what the existing fee-statement schema actually
 requires, not as a blanket assumption.
 
+STMT-005: this module also supports --verify, which independently
+reconciles a stored statement version against the live ledger via
+reconcile_statement.py instead of writing it to a file. --verify shares
+this file's existing --student/--start/--end/--version/--db-path
+arguments; --output and --force are ignored (and --output is not
+required when --verify is given). Verification never prints unrelated
+statement content -- only the RECONCILES/BLOCKED/FAILS verdict and its
+explanation.
+
 Usage:
     python agents/statement_cli.py --student 1 --start 2026-01-01 \\
         --end 2026-01-31 --output statement.txt
 
     python agents/statement_cli.py --student 1 --start 2026-01-01 \\
         --end 2026-01-31 --version 2 --output statement.txt --force
+
+    python agents/statement_cli.py --student 1 --start 2026-01-01 \\
+        --end 2026-01-31 --version 2 --verify
 """
 
 from __future__ import annotations
@@ -59,6 +71,11 @@ from statement_store import (  # noqa: E402
     get_latest_version,
     get_version,
     list_versions,
+)
+from reconcile_statement import (  # noqa: E402
+    RECONCILES,
+    StatementNotFoundError,
+    reconcile_statement,
 )
 
 
@@ -84,7 +101,13 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--version", type=int, default=None,
         help="Specific version to retrieve. Omit for the latest stored version.",
     )
-    parser.add_argument("--output", required=True, help="Destination file path.")
+    parser.add_argument("--output", default=None, help="Destination file path.")
+    parser.add_argument(
+        "--verify", action="store_true",
+        help="Verify a stored statement version against the live ledger instead of retrieving "
+             "it (STMT-005). Prints RECONCILES, BLOCKED, or FAILS with an explanation. "
+             "--output and --force are ignored.",
+    )
     parser.add_argument(
         "--force", action="store_true",
         help="Overwrite --output if it already exists. Without this flag, an existing "
@@ -94,7 +117,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--db-path", default="school.db",
         help="Path to school.db. Defaults to 'school.db' in the current directory.",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if not args.verify and args.output is None:
+        parser.error("--output is required unless --verify is used.")
+    return args
 
 
 def run(argv: list[str] | None = None) -> int:
@@ -116,6 +142,9 @@ def run(argv: list[str] | None = None) -> int:
     if not Path(args.db_path).exists():
         print(f"Error: database not found at {args.db_path!r}.", file=sys.stderr)
         return 1
+
+    if args.verify:
+        return _run_verify(args)
 
     try:
         if args.version is None:
@@ -237,6 +266,30 @@ def run(argv: list[str] | None = None) -> int:
 
     print(f"Statement version {row['version']} written to {output_path}.")
     return 0
+
+
+def _run_verify(args: argparse.Namespace) -> int:
+    """
+    STMT-005 -- verify a stored statement version against the live
+    ledger via the independent reconciler, and print only the verdict
+    plus its explanation (never unrelated statement content, per the
+    STMT-004 CLI contract this command already follows).
+
+    Exit code 0 for RECONCILES; 1 for BLOCKED, FAILS, or any error
+    (malformed period, statement never stored) -- consistent with this
+    CLI's existing "0 means nothing needs the user's attention" convention.
+    """
+    try:
+        result = reconcile_statement(
+            args.student, args.start, args.end, version=args.version, db_path=args.db_path
+        )
+    except (PeriodFormatError, StatementNotFoundError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    print(result["verdict"])
+    print(result["explanation"])
+    return 0 if result["verdict"] == RECONCILES else 1
 
 
 def main() -> None:
