@@ -1,0 +1,300 @@
+"""
+agents/statement_cli.py
+
+STMT-004 -- command-line retrieval of an already-generated fee statement
+version. This module does exactly one thing: turn a stored
+statement_versions row into an output file, unmodified.
+
+    User
+      -> statement_cli.py       (this file: argument parsing/validation)
+      -> statement_store.py     (get_latest_version / get_version / list_versions)
+      -> statement_versions row (already stored -- STMT-003's job, not this file's)
+      -> write EXACT stored content to the requested output path
+      -> print a one-line confirmation only
+
+This is retrieval, not generation:
+    - Never calls fee_statement.generate_fee_statement() or anything
+      that computes a fingerprint or decides a version number.
+    - Never inserts into statement_versions.
+    - Never reformats, re-encodes, or otherwise touches the stored
+      content string before writing it -- what's in the DB is exactly
+      what lands in the output file.
+    - Never prints statement content (lines, totals, payment ids,
+      generated_at) to the terminal -- only a short confirmation
+      naming the output file and version.
+
+Student identifier: fees_payment.student_id and statement_versions.
+student_id are both declared INTEGER in database/schema.py, and every
+fee-statement code path inspected this session (statement_store.py,
+the existing test suite) uses a plain int student_id -- unlike the
+STU-xxxxx "reference student id" concept used elsewhere in this project
+for a *different* subsystem (the synthetic risk-prediction dataset),
+which has no bearing on fee statements. --student is therefore parsed
+as int here, matching what the existing fee-statement schema actually
+requires, not as a blanket assumption.
+
+STMT-005: this module also supports --verify, which independently
+reconciles a stored statement version against the live ledger via
+reconcile_statement.py instead of writing it to a file. --verify shares
+this file's existing --student/--start/--end/--version/--db-path
+arguments; --output and --force are ignored (and --output is not
+required when --verify is given). Verification never prints unrelated
+statement content -- only the RECONCILES/BLOCKED/FAILS verdict and its
+explanation.
+
+Usage:
+    python agents/statement_cli.py --student 1 --start 2026-01-01 \\
+        --end 2026-01-31 --output statement.txt
+
+    python agents/statement_cli.py --student 1 --start 2026-01-01 \\
+        --end 2026-01-31 --version 2 --output statement.txt --force
+
+    python agents/statement_cli.py --student 1 --start 2026-01-01 \\
+        --end 2026-01-31 --version 2 --verify
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+# Matches this project's established convention for a script living
+# inside agents/ that needs to import a sibling module (see
+# test_fee_statement.py's identical sys.path.insert line).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from statement_store import (  # noqa: E402
+    PeriodFormatError,
+    get_latest_version,
+    get_version,
+    list_versions,
+)
+from reconcile_statement import (  # noqa: E402
+    RECONCILES,
+    StatementNotFoundError,
+    reconcile_statement,
+)
+
+
+def _format_available_versions(versions: list[int]) -> str:
+    """[1, 2, 3] -> '1-3'; [1] -> '1'. The versioning algorithm always
+    increments by exactly 1, so stored versions for a given student +
+    period are guaranteed contiguous -- min/max fully describes the set."""
+    if len(versions) == 1:
+        return str(versions[0])
+    return f"{min(versions)}-{max(versions)}"
+
+
+def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="statement_cli.py",
+        description="Retrieve an already-generated fee statement version and write its "
+                     "exact stored content to a file. Does not generate new statements.",
+    )
+    parser.add_argument("--student", type=int, required=True, help="Student id (integer).")
+    parser.add_argument("--start", required=True, help="Statement period start, YYYY-MM-DD (inclusive).")
+    parser.add_argument("--end", required=True, help="Statement period end, YYYY-MM-DD (inclusive).")
+    parser.add_argument(
+        "--version", type=int, default=None,
+        help="Specific version to retrieve. Omit for the latest stored version.",
+    )
+    parser.add_argument("--output", default=None, help="Destination file path.")
+    parser.add_argument(
+        "--verify", action="store_true",
+        help="Verify a stored statement version against the live ledger instead of retrieving "
+             "it (STMT-005). Prints RECONCILES, BLOCKED, or FAILS with an explanation. "
+             "--output and --force are ignored.",
+    )
+    parser.add_argument(
+        "--force", action="store_true",
+        help="Overwrite --output if it already exists. Without this flag, an existing "
+             "output file is left untouched and the command fails.",
+    )
+    parser.add_argument(
+        "--db-path", default="school.db",
+        help="Path to school.db. Defaults to 'school.db' in the current directory.",
+    )
+    args = parser.parse_args(argv)
+    if not args.verify and args.output is None:
+        parser.error("--output is required unless --verify is used.")
+    return args
+
+
+def run(argv: list[str] | None = None) -> int:
+    """
+    Returns a process exit code (0 success, 1 failure) rather than
+    calling sys.exit() directly, so tests can call this in-process and
+    assert on the return value without needing a subprocess.
+    """
+    args = _parse_args(argv)
+
+    # This CLI is retrieval-only: it must never be the reason a database
+    # file comes into existence. sqlite3.connect() silently creates an
+    # empty file at any path that doesn't exist yet, which would turn a
+    # simple typo in --db-path into "no stored versions exist" -- an
+    # error that looks like "you haven't generated this statement" when
+    # the real problem is "you pointed me at the wrong file". Checking
+    # existence up front keeps that distinction intact and avoids the
+    # stray-file side effect entirely.
+    if not Path(args.db_path).exists():
+        print(f"Error: database not found at {args.db_path!r}.", file=sys.stderr)
+        return 1
+
+    if args.verify:
+        return _run_verify(args)
+
+    try:
+        if args.version is None:
+            row = get_latest_version(args.db_path, args.student, args.start, args.end)
+        else:
+            row = get_version(args.db_path, args.student, args.start, args.end, args.version)
+    except PeriodFormatError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    if row is None:
+        if args.version is None:
+            # No stored versions at all for this student + period.
+            print(
+                "No stored versions exist for this statement. Generate the statement first.",
+                file=sys.stderr,
+            )
+            return 1
+
+        # A specific version was requested but doesn't exist -- distinguish
+        # "nothing has ever been stored" from "some versions exist, just
+        # not this one" so the error actually helps the user.
+        available = list_versions(args.db_path, args.student, args.start, args.end)
+        if not available:
+            print(
+                "No stored versions exist for this statement. Generate the statement first.",
+                file=sys.stderr,
+            )
+            return 1
+
+        print(
+            f"Version {args.version} does not exist. "
+            f"Available versions: {_format_available_versions(available)}.",
+            file=sys.stderr,
+        )
+        return 1
+
+    output_path = Path(args.output)
+    if output_path.exists() and not args.force:
+        print(f"Output file already exists: {output_path}", file=sys.stderr)
+        return 1
+
+    # Exact content, exact bytes: no reformatting, no added header, no
+    # newline translation on write (newline="" disables Python's
+    # universal-newline rewriting so whatever line endings are already
+    # in the stored string are preserved verbatim on disk).
+    #
+    # Written via a temp file in the SAME directory + os.replace() rather
+    # than a direct write_text(): write_text()/open(mode="w") truncates
+    # the destination the moment it's opened, so with --force over an
+    # existing file, a crash/kill/power-loss mid-write would leave the
+    # old content gone and a partial statement in its place -- with
+    # nothing marking it as incomplete. Writing to a sibling temp file
+    # first and only swapping it into place once the write is complete
+    # and flushed means the destination always holds either the untouched
+    # old content or the full new content, never a truncated prefix.
+    # os.replace() is atomic on both POSIX and Windows. The temp file
+    # lives in the destination's own directory so the replace is always
+    # same-filesystem (a cross-filesystem replace is not guaranteed
+    # atomic, and can fail outright on some platforms).
+    #
+    # mkstemp() deliberately creates its file mode 0600 (owner-only) --
+    # that's correct for a private scratch file, but wrong for the
+    # destination once the rename makes it permanent: permissions are a
+    # property of the inode, so whatever mkstemp set travels straight
+    # through os.replace() untouched. Left alone, --force over a file
+    # that was 0644 (e.g. shared with a colleague) would silently lock
+    # everyone else out, and a brand-new file would end up owner-only
+    # instead of respecting the umask the way open(mode="w") normally
+    # would. So the temp file's mode is explicitly set before the
+    # rename: match the existing destination's permissions if one is
+    # being overwritten, otherwise fall back to what a normal file
+    # creation would have produced under the current umask.
+    try:
+        dest_dir = output_path.resolve().parent
+        if output_path.exists():
+            target_mode = output_path.stat().st_mode & 0o777
+        else:
+            current_umask = os.umask(0)
+            os.umask(current_umask)
+            target_mode = 0o666 & ~current_umask
+
+        fd, tmp_name = tempfile.mkstemp(
+            dir=dest_dir, prefix=f".{output_path.name}.", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as tmp_file:
+                tmp_file.write(row["statement_content"])
+                tmp_file.flush()
+                os.fsync(tmp_file.fileno())
+            os.chmod(tmp_name, target_mode)
+            os.replace(tmp_name, output_path)
+
+            # fsync()ing the file only guarantees its DATA and size are
+            # durable -- the rename itself is a change to the directory
+            # entry, which lives in the containing directory's own inode.
+            # Without fsyncing the directory too, a crash right after
+            # os.replace() returns can lose the rename on some
+            # filesystems even though the confirmation below already
+            # printed: the destination could come back missing, holding
+            # the old content, or still under the temp name. Directory
+            # fsync is a POSIX-only concept (no meaningful equivalent on
+            # Windows, where os.open() can't open a directory at all),
+            # so this is best-effort and never turns into a user-facing
+            # failure -- the file itself is already safely written and
+            # renamed at this point.
+            if os.name == "posix":
+                dir_fd = os.open(str(dest_dir), os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+        except OSError:
+            Path(tmp_name).unlink(missing_ok=True)
+            raise
+    except OSError as exc:
+        print(f"Error: could not write output file {output_path}: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Statement version {row['version']} written to {output_path}.")
+    return 0
+
+
+def _run_verify(args: argparse.Namespace) -> int:
+    """
+    STMT-005 -- verify a stored statement version against the live
+    ledger via the independent reconciler, and print only the verdict
+    plus its explanation (never unrelated statement content, per the
+    STMT-004 CLI contract this command already follows).
+
+    Exit code 0 for RECONCILES; 1 for BLOCKED, FAILS, or any error
+    (malformed period, statement never stored) -- consistent with this
+    CLI's existing "0 means nothing needs the user's attention" convention.
+    """
+    try:
+        result = reconcile_statement(
+            args.student, args.start, args.end, version=args.version, db_path=args.db_path
+        )
+    except (PeriodFormatError, StatementNotFoundError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    print(result["verdict"])
+    print(result["explanation"])
+    return 0 if result["verdict"] == RECONCILES else 1
+
+
+def main() -> None:
+    sys.exit(run())
+
+
+if __name__ == "__main__":
+    main()
